@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+
+# Local GIS data
+data/raw/
+data/temp/
+*.log
