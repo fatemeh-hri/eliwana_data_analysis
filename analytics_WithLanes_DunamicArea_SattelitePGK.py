@@ -13,7 +13,11 @@ from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 
 import plotly.io as pio
-pio.templates["plotly"].layout.mapbox.accesstoken = "pk.eyJ1IjoiZmF0ZW1laC1ocmkiLCJhIjoiY21wZGppbXk4MDI5NTJyb29za21tMHczdSJ9.rbe6zVOvEtIlWI-9SpEu7A"
+
+load_dotenv()
+
+mapbox_token = os.environ["MAPBOX_ACCESS_TOKEN"]
+pio.templates["plotly"].layout.mapbox.accesstoken = mapbox_token
 
 DXF_PATH = r"Map_Lane/FMS_Map_20260520_135053.dxf"
 
