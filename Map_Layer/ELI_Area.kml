@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:sx="http://www.skylineglobe.com/kml/ext/7.03.001" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:la="http://www.skylineglobe.com/layer/attributes">
+	<Document>
+		<sx:Terrain>
+			<sx:RasterLayer><Link><href>/Imagery</href>
+					<sx:layerName></sx:layerName>
+				</Link>
+				<sx:elevation>0</sx:elevation>
+			</sx:RasterLayer>
+			<sx:RasterLayer><Link><href>/Elevation</href>
+					<sx:layerName></sx:layerName>
+				</Link>
+				<sx:elevation>1</sx:elevation>
+			</sx:RasterLayer>
+		</sx:Terrain>
+		<Style id="Polyline">
+			<LineStyle><color>ffffffff</color>
+				<colorMode>normal</colorMode>
+				<width>2</width>
+			</LineStyle>
+			<sx:order>0</sx:order>
+		</Style>
+		<Style id="Polygon">
+			<LineStyle><color>ffffffff</color>
+				<colorMode>normal</colorMode>
+				<width>2</width>
+			</LineStyle>
+			<PolyStyle><fill>0</fill>
+			</PolyStyle>
+			<sx:order>0</sx:order>
+		</Style>
+		<Style id="BaseGlobe.I.tbp">
+			<sx:order>-10</sx:order>
+		</Style><Folder><name>MyPlaces</name>
+			<open>1</open>
+			<sx:RasterLayer id="0_205288210"><name>BaseGlobe.I.tbp</name>
+				<styleUrl>#BaseGlobe.I.tbp</styleUrl>
+				<Link><href>https://fortescuesky.fmgl.com.au/SG/default/streamer.ashx</href>
+					<sx:layerName>BaseGlobe.I.tbp</sx:layerName>
+					<sx:format>image/jpeg</sx:format>
+					<sx:service>WMS</sx:service>
+				</Link>
+				<sx:rasterData>&lt;!!!BaseGlobe.I.tbp&gt;&lt;&lt;00000282UaINUFOcPMJPUxuzUuiuUrT5Evk9.wMJUMkzUkxy.9vMTJMPAP9y.ty1.x32.wx2.42w.13x.x21P2yk.svv.3MJUUxrT9nzUzvy.6uuUluxUzkyUi1kUyq5TtlsEmrtUiusTtg1TuSGTujkUlg1ErzuUyzxUkgsEkxtUgynQ4#xUkw1UkyzT9GkUzMgQvlVUkxyUout.9wt.wtwTlSkUx2oEik9UWMSTlSRQS9EUPSG.6zy.x2lUBBOAX9s.w4v.rs5.vrw.4vr.5vlUHEIUGHT.9wxP4lWUIDTAH9x.12lULg5UkxyT9BgUykGUruhQktITtzhQvlSUz5rEky9TlFuUxsgQz9oUsgmQkupUvkmPMJCUgvgUhorUozoUkyUExr9UnzzEvy6PuulUuxzUkyiU1kyEq5tUlsmQrtiEustEg1uESGuUSzxUkgsEkxtUgynA4#MTJ41Ar9s.w4vPMJ5Erx9.s5vPMJ4Erx9.w4vPMJ5E1r9.5vMTJWKQT9GUEOGUCSaThWGASf4.zhrUDATUUMaThWGESew.54zPhrSUPHEUROIEDahUWGS.f4z.hr2.y34.wy3.rx5.4tx.13x.xy1.2yrUAUTUHORUITYQahEUPSG.hrh.3vyPvhcQcrAUUTHUORIUTYaThEPESGh.rh2.yx2ThccTrPRUIMEEMahUGxkUkt3Uoin.hrvTrAUUTHOURITEYahUEPSAGhr.h45.vwhEccrUUNIETahUjkmUxkk.hrv.tvw.3z1.yx5.x1w.55z.yyrUAUTUHORUITYQahEUPSG.hrh.5wxPxhcQcrAUUTHUORIUTYaThEPESGh.rhz.yx2Thcc.MJ.&gt;&gt;.wms</sx:rasterData>
+				<sx:geometryWKT>MULTIPOLYGON (((117.3169277407633899 -22.2866793908631280, 116.6611956700025274 -22.2803319052468147, 116.6152646577379528 -22.5101959651379033, 117.3104290505220320 -22.5456511059803297, 117.3169277407633899 -22.2866793908631280)), ((116.6611956700025274 -22.2803319052468147, 116.6616389893562200 -22.2781132912550142, 116.6548177157064288 -22.2802701666572887, 116.6611956700025274 -22.2803319052468147)))</sx:geometryWKT>
+				<sx:BoundingBox><sx:minX>-180.00000016763812027</sx:minX>
+					<sx:maxX>180.00000016763800659</sx:maxX>
+					<sx:minY>90.000000167638063431</sx:minY>
+					<sx:maxY>-90.000000167638063431</sx:maxY>
+				</sx:BoundingBox>
+			</sx:RasterLayer>
+			<Placemark id="0_205297839"><name>New Polygon ##13794917</name>
+				<styleUrl>#Polygon</styleUrl>
+				<Polygon>
+					<altitudeMode>relativeToGround</altitudeMode>
+					<outerBoundaryIs>
+						<LinearRing>
+							<coordinates>117.289195495046,-22.2875877747846,0 117.295851679304,-22.5423426327521,0 116.609704167026,-22.5162004060954,0 116.620749268729,-22.2496835990117,0 117.289195495046,-22.2875877747846,0</coordinates>
+						</LinearRing>
+					</outerBoundaryIs>
+				</Polygon>
+			</Placemark>
+			<Placemark id="0_205298465"><name>New Polyline ##13796171</name>
+				<styleUrl>#Polyline</styleUrl>
+				<LineString>
+					<altitudeMode>relativeToGround</altitudeMode>
+					<coordinates>117.288741404137,-22.2898230777758,0 117.292679425672,-22.5404678514401,0 116.613533031002,-22.5143482447366,0 116.624350735106,-22.2534746810577,0 117.289152466256,-22.2894535621376,0</coordinates>
+				</LineString>
+			</Placemark>
+		</Folder>
+	</Document>
+</kml>
