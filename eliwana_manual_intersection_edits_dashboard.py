@@ -439,6 +439,7 @@ MANUAL_MOVE_INTERSECTIONS = {
     "Centerline Intersection 83": (0, 20), 
     "Centerline Intersection 219": (0, -10), 
     "Centerline Intersection 218": (0, -10),
+    "Centerline Intersection 5": (20, -30),
 }
 
 # -----------------------------
@@ -574,6 +575,16 @@ MANUAL_COPY_INTERSECTIONS = [
         "SOURCE": "Centerline Intersection 156",
         "NEW_NAME": "Centerline Intersection 522",
         "OFFSET_XY": (120, 0),
+    },
+    {
+        "SOURCE": "Centerline Intersection 158",
+        "NEW_NAME": "Centerline Intersection 523",
+        "OFFSET_XY": (610, -130),
+    },
+    {
+        "SOURCE": "Centerline Intersection 206",
+        "NEW_NAME": "Centerline Intersection 524",
+        "OFFSET_XY": (0, 95),
     },
 ]
 
@@ -1913,7 +1924,7 @@ intersection_gdf = gpd.GeoDataFrame(
 # This lets you remove false positives, move polygons, replace polygons,
 # or add missed intersections from the CONFIG section above.
 intersection_gdf = apply_manual_intersection_edits(intersection_gdf)
-# export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
+export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
 
 static_layers = []
 

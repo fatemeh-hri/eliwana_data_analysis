@@ -25,14 +25,14 @@ TARGET_CRS = "EPSG:4326"
 # export_intersections_csv() writes the final GeoDataFrame in TARGET_CRS.
 INTERSECTION_CSV_CRS = TARGET_CRS
 
-# DEFAULT_START_DATETIME = "2026-06-01 00:00:00"
-# DEFAULT_END_DATETIME = "2026-06-15 00:00:00"
+DEFAULT_START_DATETIME = "2026-07-01 00:00:00"
+DEFAULT_END_DATETIME = "2026-07-15 00:00:00"
 
 # DEFAULT_START_DATETIME = "2026-06-01 00:00:00"
 # DEFAULT_END_DATETIME = "2026-06-02 00:00:00"
 
-DEFAULT_START_DATETIME = "2026-06-01 11:00:00"
-DEFAULT_END_DATETIME = "2026-06-01 11:30:00"
+# DEFAULT_START_DATETIME = "2026-06-01 11:00:00"
+# DEFAULT_END_DATETIME = "2026-06-01 11:30:00"
 
 LANE_BUFFER_METRES = 10
 INTERSECTION_POINT_TOLERANCE_METRES = 10
@@ -116,15 +116,15 @@ def add_historical_risk_analysis(df):
 
     out["HIERARCHY_ASSESSMENT"] = "Not Applicable - Straight Path"
     out.loc[is_intersection, "HIERARCHY_ASSESSMENT"] = "Intersection Interaction - Review"
-    out.loc[is_intersection & ht_moving & ~hov_moving, "HIERARCHY_ASSESSMENT"] = (
-        "HT/AHT moving and HOV stationary"
-    )
-    out.loc[is_intersection & hov_moving, "HIERARCHY_ASSESSMENT"] = (
-        "HOV moving in intersection"
-    )
-    # out.loc[is_intersection & ht_moving, "HIERARCHY_ASSESSMENT"] = (
+    # out.loc[is_intersection & ht_moving & ~hov_moving, "HIERARCHY_ASSESSMENT"] = (
+    #     "HT moving and HOV stationary"
+    # )
+    # out.loc[is_intersection & hov_moving, "HIERARCHY_ASSESSMENT"] = (
     #     "HOV moving in intersection"
     # )
+    out.loc[is_intersection & ht_moving, "HIERARCHY_ASSESSMENT"] = (
+        "HT moving in intersection"
+    )
     out.loc[is_intersection & ~ht_moving & ~hov_moving, "HIERARCHY_ASSESSMENT"] = (
         "Both Stationary / Queue Review"
     )
@@ -398,7 +398,7 @@ raw_matches AS (
        AND l.GRID_X BETWEEN h.GRID_X - 1 AND h.GRID_X + 1
        AND l.GRID_Y BETWEEN h.GRID_Y - 1 AND h.GRID_Y + 1
     WHERE h.IS_MOVING = 1
-       OR l.IS_MOVING = 1
+       --OR l.IS_MOVING = 1
 ),
 
 matches AS (
@@ -1111,7 +1111,7 @@ app.layout = html.Div(
         dcc.Graph(id="asset-pareto"),
         dcc.Graph(id="area-pareto"),
         dcc.Graph(id="intersection-risk-pareto"),
-        dcc.Graph(id="hierarchy-pareto"),
+        # dcc.Graph(id="hierarchy-pareto"),
 
         html.Div(
             "Interaction Rate Metrics",
@@ -1193,7 +1193,7 @@ def load_data_to_store(n_intervals):
     Output("asset-pareto", "figure"),
     Output("area-pareto", "figure"),
     Output("intersection-risk-pareto", "figure"),
-    Output("hierarchy-pareto", "figure"),
+    # Output("hierarchy-pareto", "figure"),
     Output("summary-cards", "children"),
     Output("rate-table", "data"),
     Output("rate-table", "columns"),
@@ -1263,10 +1263,10 @@ def update_pareto(payload, hide_loading_value):
         intersection_risk.to_dict("records"),
         "Historical Intersection Risk Exposure by Intersection and Asset Pair",
     )
-    hierarchy_fig = build_risk_exposure_chart(
-        hierarchy.to_dict("records"),
-        "Intersection Hierarchy Review",
-    )
+    # hierarchy_fig = build_risk_exposure_chart(
+    #     hierarchy.to_dict("records"),
+    #     "Intersection Hierarchy Review",
+    # )
 
     # ex_haul_road = pareto_df[
     #     pareto_df["HOV_ASSET"].eq("EX")
@@ -1304,7 +1304,7 @@ def update_pareto(payload, hide_loading_value):
         asset_fig,
         area_fig,
         intersection_risk_fig,
-        hierarchy_fig,
+        # hierarchy_fig,
         summary_cards,
         rate_df.to_dict("records"),
         rate_columns,
