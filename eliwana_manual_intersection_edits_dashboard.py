@@ -12,7 +12,7 @@ from shapely.geometry import LineString, Polygon, Point
 from shapely.ops import unary_union, nearest_points
 from shapely.affinity import translate
 from lxml import etree
-
+import os
 import json
 
 from dash import Dash, dcc, html
@@ -439,6 +439,7 @@ MANUAL_MOVE_INTERSECTIONS = {
     "Centerline Intersection 83": (0, 20), 
     "Centerline Intersection 219": (0, -10), 
     "Centerline Intersection 218": (0, -10),
+    "Centerline Intersection 5": (20, -30),
 }
 
 # -----------------------------
@@ -574,6 +575,16 @@ MANUAL_COPY_INTERSECTIONS = [
         "SOURCE": "Centerline Intersection 156",
         "NEW_NAME": "Centerline Intersection 522",
         "OFFSET_XY": (120, 0),
+    },
+    {
+        "SOURCE": "Centerline Intersection 158",
+        "NEW_NAME": "Centerline Intersection 523",
+        "OFFSET_XY": (610, -130),
+    },
+    {
+        "SOURCE": "Centerline Intersection 206",
+        "NEW_NAME": "Centerline Intersection 524",
+        "OFFSET_XY": (0, 95),
     },
 ]
 
@@ -1566,13 +1577,14 @@ def kml_to_geojson(kml_file):
 def load_nearby_machine_data(start_date, end_date):
 
     engine = create_engine('snowflake://{user}:{password}@{account}/{database}/{schema}?warehouse={warehouse}&role={role}&authenticator=externalbrowser'.format(
-            user = "FATEMEH.HAERI@FORTESCUE.COM",
+            account=os.environ["SNOWFLAKE_ACCOUNT"],
+            user=os.environ["SNOWFLAKE_USER"],
             password = "",
-            account = "FMG-WN74261",
-            database = "AA_OPERATIONS_MANAGEMENT",
-            schema = "SELFSERVICE",
-            warehouse = "WH_AA_OPERATIONS_MANAGEMENT",
-            role = "EDW_FATEMEH.HAERI"
+            authenticator=os.getenv("SNOWFLAKE_AUTHENTICATOR", "externalbrowser"),
+            role=os.environ["SNOWFLAKE_ROLE"],
+            warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
+            database=os.environ["SNOWFLAKE_DATABASE"],
+            schema=os.environ["SNOWFLAKE_SCHEMA"],
         ))
 
     hov_type_sql = "'DZ', 'WD', 'WC', 'GR', 'LV', 'EL', 'WL', 'EX'"
@@ -1913,7 +1925,7 @@ intersection_gdf = gpd.GeoDataFrame(
 # This lets you remove false positives, move polygons, replace polygons,
 # or add missed intersections from the CONFIG section above.
 intersection_gdf = apply_manual_intersection_edits(intersection_gdf)
-# export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
+export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
 
 static_layers = []
 

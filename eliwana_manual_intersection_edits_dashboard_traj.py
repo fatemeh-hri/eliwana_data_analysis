@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Polygon, Point
 from shapely.ops import unary_union, nearest_points
 from shapely.affinity import translate
 from lxml import etree
-
+import os
 import json
 
 from dash import Dash, dcc, html
@@ -1559,13 +1559,14 @@ def kml_to_geojson(kml_file):
 def load_nearby_machine_data(start_date, end_date):
 
     engine = create_engine('snowflake://{user}:{password}@{account}/{database}/{schema}?warehouse={warehouse}&role={role}&authenticator=externalbrowser'.format(
-            user = "FATEMEH.HAERI@FORTESCUE.COM",
+            account=os.environ["SNOWFLAKE_ACCOUNT"],
+            user=os.environ["SNOWFLAKE_USER"],
             password = "",
-            account = "FMG-WN74261",
-            database = "AA_OPERATIONS_MANAGEMENT",
-            schema = "SELFSERVICE",
-            warehouse = "WH_AA_OPERATIONS_MANAGEMENT",
-            role = "EDW_FATEMEH.HAERI"
+            authenticator=os.getenv("SNOWFLAKE_AUTHENTICATOR", "externalbrowser"),
+            role=os.environ["SNOWFLAKE_ROLE"],
+            warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
+            database=os.environ["SNOWFLAKE_DATABASE"],
+            schema=os.environ["SNOWFLAKE_SCHEMA"],
         ))
 
     hov_type_sql = "'DZ', 'WD', 'WC', 'GR', 'LV', 'EL', 'WL', 'EX'"
