@@ -44,10 +44,18 @@ TARGET_CRS = "EPSG:4326"
 # DEFAULT_END_DATETIME = "2026-06-15 11:30:00"
 
 DEFAULT_START_DATETIME = "2026-07-01 11:00:00"
-DEFAULT_END_DATETIME = "2026-07-01 13:00:00"
+DEFAULT_END_DATETIME = "2026-07-01 11:30:00"
 
 
 HOV_ASSET_TYPES = ["DZ", "WD", "WC", "GR", "LV", "ELI", "WL", "EX"]
+
+# Colour coding for trajectory points by operational area type.
+AREA_COLORS = {
+    "haul road": "#1f77b4",       # Blue
+    "intersection": "#ff8c00",    # Orange
+    "dynamic area": "#2ca02c",    # Green
+}
+DEFAULT_AREA_COLOR = "#808080"     # Grey for unclassified points
 
 # Intersection detection approach:
 #   1. buffer lane LineStrings to create road-surface polygons,
@@ -1963,33 +1971,33 @@ for _, row in intersection_gdf.iterrows():
             )
         )
 
-    centre = polygon.centroid
-    intersection_name = row.get("INTERSECTION_NAME", "-")
+    # centre = polygon.centroid
+    # intersection_name = row.get("INTERSECTION_NAME", "-")
 
-    static_layers.append(
-        dl.DivMarker(
-            position=[centre.y, centre.x],
-            iconOptions={
-                "html": (
-                    "<div style='"
-                    "background: orange;"
-                    "color: black;"
-                    "font-size: 11px;"
-                    "font-weight: bold;"
-                    "padding: 2px 5px;"
-                    "border: 1px solid black;"
-                    "border-radius: 4px;"
-                    "white-space: nowrap;"
-                    "'>"
-                    f"{intersection_name}"
-                    "</div>"
-                ),
-                "className": "intersection-label",
-                "iconSize": [120, 22],
-                "iconAnchor": [60, 11],
-            },
-        )
-    )
+    # static_layers.append(
+    #     dl.DivMarker(
+    #         position=[centre.y, centre.x],
+    #         iconOptions={
+    #             "html": (
+    #                 "<div style='"
+    #                 "background: orange;"
+    #                 "color: black;"
+    #                 "font-size: 11px;"
+    #                 "font-weight: bold;"
+    #                 "padding: 2px 5px;"
+    #                 "border: 1px solid black;"
+    #                 "border-radius: 4px;"
+    #                 "white-space: nowrap;"
+    #                 "'>"
+    #                 f"{intersection_name}"
+    #                 "</div>"
+    #             ),
+    #             "className": "intersection-label",
+    #             "iconSize": [120, 22],
+    #             "iconAnchor": [60, 11],
+    #         },
+    #     )
+    # )
 
 
 # -----------------------------
@@ -2085,6 +2093,79 @@ app.layout = html.Div(
                     allowCross=False
                 )
             ]
+        ),
+
+        html.Div(
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "18px",
+                "padding": "8px 12px",
+                "alignItems": "center",
+                "fontWeight": "bold",
+                "backgroundColor": "rgba(255, 255, 255, 0.92)",
+                "borderTop": "1px solid #d0d0d0",
+                "borderBottom": "1px solid #d0d0d0",
+            },
+            children=[
+                html.Span("Operational Area:"),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["haul road"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Haul Road",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["intersection"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Intersection",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["dynamic area"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Dynamic Area",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": DEFAULT_AREA_COLOR,
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Unclassified",
+                ]),
+            ],
         ),
 
         dl.Map(
@@ -2197,16 +2278,6 @@ def update_controls(start_date, end_date):
     Input("end-datetime", "value")
 )
 def update_map(selected_machines, time_range, start_date, end_date):
-    prefix_colors = {
-            "DZ": "blue",
-            "WD": "green",
-            "WC": "pink",
-            "GR": "brown",
-            "LV": "red",
-            "EL": "red",
-            "WL": "purple",
-            "EX": "black"
-        }
     if not selected_machines:
         return []
 
@@ -2242,174 +2313,10 @@ def update_map(selected_machines, time_range, start_date, end_date):
     #     index=False
     # )
 
-    near_miss_points = gdf_plot[
-        (gdf_plot["INTERACTION_TYPE"] == "NEAR_MISS") &
-        (gdf_plot["DISTANCE_METRES"] < 15)
-    ].dropna(subset=["lon", "lat"]).sort_values("DISTANCE_METRES").groupby(["MACHINE", "PAIR_MACHINE"], as_index=False).first().copy()
-
-    # ----------------------------------------------
-    # Identify first HT points within CAS range for each HT-HOV pair to mark on the map
-    # ----------------------------------------------
-    ht_points = (
-    gdf_plot[(gdf_plot["TYPE"] == "HT")]
-        .dropna(subset=["lon", "lat"])
-        .sort_values(["MACHINE", "PAIR_MACHINE", "TIME_INT"])
-        .copy()
-    )
-    # New CAS interaction starts when same HT/HOV pair has a time gap
-
-    MAX_GAP_SECONDS = 5
-
-    ht_points["PREV_TIME_INT"] = (
-        ht_points
-        .groupby(["MACHINE", "PAIR_MACHINE"])["TIME_INT"]
-        .shift()
-    )
-
-    ht_points["NEW_INTERACTION"] = (
-        ht_points["PREV_TIME_INT"].isna() |
-        ((ht_points["TIME_INT"] - ht_points["PREV_TIME_INT"]) > MAX_GAP_SECONDS)
-    )
-
-    ht_points["INTERACTION_ID"] = (
-        ht_points
-        .groupby(["MACHINE", "PAIR_MACHINE"])["NEW_INTERACTION"]
-        .cumsum()
-    )
-
-    first_ht_points = (
-        ht_points
-        .sort_values(["MACHINE", "PAIR_MACHINE", "INTERACTION_ID", "TIME_INT"])
-        .drop_duplicates(
-            subset=["MACHINE", "PAIR_MACHINE", "INTERACTION_ID"],
-            keep="first"
-        )
-    )
-
-    print(len(first_ht_points))
-
-    # ----------------------------------------------
-    # Identify first HOV points within CAS range for each HT-HOV pair to mark on the map
-    # ----------------------------------------------
-    """
-    hov_points = (
-    gdf_plot[(gdf_plot["TYPE"] == "HOV")]
-        .dropna(subset=["lon", "lat"])
-        .sort_values(["MACHINE", "PAIR_MACHINE", "TIME_INT"])
-        .copy()
-    )
-    # New CAS interaction starts when same HT/HOV pair has a time gap
-
-    MAX_GAP_SECONDS = 5
-
-    hov_points["PREV_TIME_INT"] = (
-        hov_points
-        .groupby(["MACHINE", "PAIR_MACHINE"])["TIME_INT"]
-        .shift()
-    )
-
-    hov_points["NEW_INTERACTION"] = (
-        hov_points["PREV_TIME_INT"].isna() |
-        ((hov_points["TIME_INT"] - hov_points["PREV_TIME_INT"]) > MAX_GAP_SECONDS)
-    )
-
-    hov_points["INTERACTION_ID"] = (
-        hov_points
-        .groupby(["MACHINE", "PAIR_MACHINE"])["NEW_INTERACTION"]
-        .cumsum()
-    )
-
-    first_hov_points = (
-        hov_points
-        .sort_values(["MACHINE", "PAIR_MACHINE", "INTERACTION_ID", "TIME_INT"])
-        .drop_duplicates(
-            subset=["MACHINE", "PAIR_MACHINE", "INTERACTION_ID"],
-            keep="first"
-        )
-    )
-    """
     if gdf_plot.empty:
         return []
 
     layers = []
-
-    def build_near_miss_marker(row):
-        marker_label = "!" if row["TYPE"] == "HT" else "⚠"
-        return dl.DivMarker(
-            id=(
-                f"NEAR_MISS_{row['TYPE']}_"
-                f"{row['MACHINE']}_"
-                f"{row['PAIR_MACHINE']}_"
-                f"{row['TIME_INT']}_"
-                f"{row['lat']:.6f}_"
-                f"{row['lon']:.6f}"
-            ),
-            position=[row["lat"], row["lon"]],
-            iconOptions={
-                "html": (
-                    "<div style='font-size:18px;font-weight:bold;"
-                    "color:red;background:white;border:2px solid red;"
-                    "border-radius:50%;width:22px;height:22px;"
-                    "line-height:20px;text-align:center;'>"
-                    f"{marker_label}</div>"
-                ),
-                "className": "near-miss-machine-marker",
-                "iconSize": [22, 22],
-                "iconAnchor": [11, 11],
-            },
-            children=[
-                dl.Tooltip([
-                    html.Div("Near miss: distance < 15 m"),
-                    html.Div(f"Type: {row['TYPE']}"),
-                    html.Div(f"Machine: {row['MACHINE']}"),
-                    html.Div(f"Near Machine: {row['PAIR_MACHINE']}"),
-                    html.Div(f"Time: {row['TIMESTAMP']}"),
-                    html.Div(f"Distance: {row['DISTANCE_METRES']:.2f} m"),
-                    html.Div(f"Moving: {row['MOVING_STATUS']}"),
-                    html.Div(f"Area: {row['AREA_CATEGORY']}"),
-                    html.Div(f"X: {row['X']:.2f}"),
-                    html.Div(f"Y: {row['Y']:.2f}"),
-                ])
-            ],
-        )
-
-    for near_miss_row in near_miss_points.to_dict("records"):
-        layers.append(build_near_miss_marker(near_miss_row))
-
-    # for _, intersection_row in intersection_points.iterrows():
-    #     layers.append(
-    #         dl.CircleMarker(
-    #             id=(
-    #                 f"INTERSECTION_POINT_"
-    #                 f"{intersection_row['TYPE']}_"
-    #                 f"{intersection_row['MACHINE']}_"
-    #                 f"{intersection_row['PAIR_MACHINE']}_"
-    #                 f"{intersection_row['TIME_INT']}_"
-    #                 f"{intersection_row['lat']:.6f}_"
-    #                 f"{intersection_row['lon']:.6f}"
-    #             ),
-    #             center=[intersection_row["lat"], intersection_row["lon"]],
-    #             radius=9,
-    #             color="orange",
-    #             fillColor="orange",
-    #             fill=True,
-    #             fillOpacity=0.35,
-    #             weight=3,
-    #             children=[
-    #                 dl.Tooltip([
-    #                     html.Div("Point inside calculated intersection area"),
-    #                     html.Div(f"Intersection: {intersection_row['INTERSECTION_NAME'] or '-'}"),
-    #                     html.Div(f"Type: {intersection_row['TYPE']}"),
-    #                     html.Div(f"Machine: {intersection_row['MACHINE']}"),
-    #                     html.Div(f"Near Machine: {intersection_row['PAIR_MACHINE']}"),
-    #                     html.Div(f"Time: {intersection_row['TIMESTAMP']}"),
-    #                     html.Div(f"Distance to lane: {intersection_row['DISTANCE_TO_LANE_M']:.2f} m"),
-    #                     html.Div(f"X: {intersection_row['X']:.2f}"),
-    #                     html.Div(f"Y: {intersection_row['Y']:.2f}")
-    #                 ])
-    #             ]
-    #         )
-    #     )
 
     grouped = {
         (machine_type, prefix): group.sort_values("TIME_INT")
@@ -2423,10 +2330,14 @@ def update_map(selected_machines, time_range, start_date, end_date):
             continue
 
         for _, row in group.iterrows():
-            if row["TYPE"] == "HT":
-                marker_color = "yellow"
-            else:
-                marker_color = prefix_colors.get(row["PREFIX"], "gray")
+            area_category = str(
+                row.get("AREA_CATEGORY", "")
+            ).strip().lower()
+
+            marker_color = AREA_COLORS.get(
+                area_category,
+                DEFAULT_AREA_COLOR,
+            )
 
             layers.append(
                 dl.CircleMarker(
@@ -2456,7 +2367,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
                             html.Div(f"Distance: {row['DISTANCE_METRES']:.2f} m"),
                             html.Div(f"Interaction: {row['INTERACTION_TYPE']}"),
                             html.Div(f"Moving: {row['MOVING_STATUS']}"),
-                            html.Div(f"Area: {row['AREA_CATEGORY']}"),
+                            html.Div(f"Operational Area: {str(row['AREA_CATEGORY']).title()}"),
                             html.Div(f"Intersection: {row['INTERSECTION_NAME'] or '-'}"),
                             html.Div(f"Distance to lane: {row['DISTANCE_TO_LANE_M']:.2f} m"),
                             html.Div(f"X: {row['X']:.2f}"),
@@ -2466,70 +2377,6 @@ def update_map(selected_machines, time_range, start_date, end_date):
                 )
             )
 
-    for _, value in first_ht_points.iterrows():
-        layers.append(
-            dl.DivMarker(
-                id=(
-                    f"FIRST_HT_DT_X_"
-                    f"{value['MACHINE']}_"
-                    f"{value['PAIR_MACHINE']}_"
-                    f"{value['TIME_INT']}"
-                ),
-                position=[value["lat"], value["lon"]],
-                iconOptions={
-                    "html": "<div style='font-size:22px;font-weight:bold;color:black;text-shadow:0 0 3px white;'>X</div>",
-                    "className": "ht-dt-entry-x-marker",
-                    "iconSize": [22, 22]
-                },
-                children=[
-                    dl.Tooltip([
-                        html.Div("First HT/DT point in interaction"),
-                        html.Div(f"HT/DT: {value['MACHINE']}"),
-                        html.Div(f"HOV: {value['PAIR_MACHINE']}"),
-                        html.Div(f"Time: {value['TIMESTAMP']}"),
-                        html.Div(f"Distance: {value['DISTANCE_METRES']:.2f} m"),
-                        html.Div(f"Interaction: {value['INTERACTION_TYPE']}"),
-                        html.Div(f"Moving: {value['MOVING_STATUS']}"),
-                        html.Div(f"Area: {value['AREA_CATEGORY']}"),
-                        html.Div(f"X: {value['X']:.2f}"),
-                        html.Div(f"Y: {value['Y']:.2f}")
-                    ])
-                ]
-            )
-        )
-    """
-    for _, value in first_hov_points.iterrows():
-        layers.append(
-            dl.DivMarker(
-                id=(
-                    f"FIRST_HOV_X_"
-                    f"{value['MACHINE']}_"
-                    f"{value['PAIR_MACHINE']}_"
-                    f"{value['TIME_INT']}"
-                ),
-                position=[value["lat"], value["lon"]],
-                iconOptions={
-                    "html": "<div style='font-size:22px;font-weight:bold;color:red;text-shadow:0 0 3px white;'>X</div>",
-                    "className": "hov-entry-x-marker",
-                    "iconSize": [22, 22]
-                },
-                children=[
-                    dl.Tooltip([
-                        html.Div("First HOV point in interaction"),
-                        html.Div(f"HOV: {value['MACHINE']}"),
-                        html.Div(f"HT/DT: {value['PAIR_MACHINE']}"),
-                        html.Div(f"Time: {value['TIMESTAMP']}"),
-                        html.Div(f"Distance: {value['DISTANCE_METRES']:.2f} m"),
-                        html.Div(f"Interaction: {value['INTERACTION_TYPE']}"),
-                        html.Div(f"Moving: {value['MOVING_STATUS']}"),
-                        html.Div(f"Area: {value['AREA_CATEGORY']}"),
-                        html.Div(f"X: {value['X']:.2f}"),
-                        html.Div(f"Y: {value['Y']:.2f}")
-                    ])
-                ]
-            )
-        )
-    """
     return layers
 
 

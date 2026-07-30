@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Polygon, Point
 from shapely.ops import unary_union, nearest_points
 from shapely.affinity import translate
 from lxml import etree
-import os
+
 import json
 
 from dash import Dash, dcc, html
@@ -21,9 +21,9 @@ from dash.dependencies import Input, Output
 import dash_leaflet as dl
 
 try:
-    from .geometry import 
+    from centerline.geometry import Centerline
 except ImportError:
-     = None
+    Centerline = None
 
 
 # -----------------------------
@@ -40,34 +40,42 @@ TARGET_CRS = "EPSG:4326"
 # DEFAULT_START_DATETIME = "2026-05-09 11:19:01"
 # DEFAULT_END_DATETIME = "2026-05-09 13:19:01"
 
-DEFAULT_START_DATETIME = "2026-06-01 11:00:00"
-DEFAULT_END_DATETIME = "2026-06-01 11:30:00"
+DEFAULT_START_DATETIME = "2026-06-15 11:00:00"
+DEFAULT_END_DATETIME = "2026-06-15 11:30:00"
 
-# DEFAULT_START_DATETIME = "2026-06-01 00:00:00"
-# DEFAULT_END_DATETIME = "2026-06-02 00:00:00"
+# DEFAULT_START_DATETIME = "2026-07-01 11:00:00"
+# DEFAULT_END_DATETIME = "2026-07-01 11:30:00"
 
 
 HOV_ASSET_TYPES = ["DZ", "WD", "WC", "GR", "LV", "ELI", "WL", "EX"]
 
-#Intersection detection approach:
+# Colour coding for trajectory points by operational area type.
+AREA_COLORS = {
+    "haul road": "#1f77b4",       # Blue
+    "intersection": "#ff8c00",    # Orange
+    "dynamic area": "#2ca02c",    # Green
+}
+DEFAULT_AREA_COLOR = "#808080"     # Grey for unclassified points
+
+# Intersection detection approach:
 #   1. buffer lane LineStrings to create road-surface polygons,
 #   2. generate road centrelines from those polygons,
 #   3. build a graph from centreline segments,
 #   4. detect compact clusters of graph nodes with degree >= 3,
 #   5. create polygons around the local centreline branches.
-# This avoids falseIntersections caused by many parallel lane self-join rows.
+# This avoids false intersections caused by many parallel lane self-join rows.
 
 # LANE_BUFFER_METRES = 10
 LANE_BUFFER_METRES = 12
 INTERSECTION_POINT_TOLERANCE_METRES = 10
 
 ROAD_POLYGON_BUFFER_METRES = 8
-_INTERPOLATION_DISTANCE = 5
+CENTERLINE_INTERPOLATION_DISTANCE = 5
 NODE_SNAP_METRES = 5
 # NODE_SNAP_METRES = 8
 MIN_GRAPH_DEGREE = 3
 INTERSECTION_CLUSTER_BUFFER_METRES = 30
-#Intersection_CLUSTER_BUFFER_METRES = 35
+# INTERSECTION_CLUSTER_BUFFER_METRES = 35
 INTERSECTION_POLYGON_RADIUS_METRES = 45
 INTERSECTION_POLYGON_BUFFER_METRES = 12
 MIN_BRANCH_COUNT = 3
@@ -94,7 +102,7 @@ def debug_log(label, value=None):
         else:
             print(value, flush=True)
 
-# DefineIntersection boxes in SOURCE_CRS metres: (name, min_x, min_y, max_x, max_y).
+# Define intersection boxes in SOURCE_CRS metres: (name, min_x, min_y, max_x, max_y).
 # Add/edit boxes after visually checking the X markers against the map.
 INTERSECTION_BOXES = [
     # ("Intersection 1", 650000, 7550000, 650100, 7550100),
@@ -117,9 +125,9 @@ INTERSECTION_POLYGONS = [
 ]
 
 # -----------------------------
-# MANUALIntersection EDITS
+# MANUAL INTERSECTION EDITS
 # -----------------------------
-# Use this section to correct automatically detectedIntersection polygons.
+# Use this section to correct automatically detected intersection polygons.
 # All offsets are in SOURCE_CRS metres, so:
 #   x_offset_m < 0 = move west/left
 #   x_offset_m > 0 = move east/right
@@ -127,457 +135,468 @@ INTERSECTION_POLYGONS = [
 #   y_offset_m > 0 = move north/up
 #
 # Example from your screenshot:
-#   - removeIntersection 56, 162, and 372
-#   - moveIntersection 70 and 161 slightly down-left
+#   - remove Centerline Intersection 56, 162, and 372
+#   - move Centerline Intersection 70 and 161 slightly down-left
 #
 # You can add more names here after checking the map labels.
 MANUAL_DELETE_INTERSECTIONS = {
-    "Intersection 56",
-    "Intersection 162",
-    "Intersection 372",
-    "Intersection 261",
-    "Intersection 369",
-    "Intersection 361",
-    "Intersection 387",
-    "Intersection 318",
-    "Intersection 377",
-    "Intersection 117",
-    "Intersection 50",
-    "Intersection 364",
-    "Intersection 198",
-    "Intersection 165",
-    "Intersection 4",
-    "Intersection 348",
-    "Intersection 311",
-    "Intersection 159",
-    "Intersection 88",
-    "Intersection 320",
-    "Intersection 125",
-    "Intersection 373",
-    "Intersection 15",
-    "Intersection 384",
-    "Intersection 319",
-    "Intersection 101",
-    "Intersection 323",
-    "Intersection 322",
-    "Intersection 226",
-    "Intersection 294",
-    "Intersection 138",
-    "Intersection 388",
-    "Intersection 290",
-    "Intersection 308",
-    "Intersection 97",
-    "Intersection 362",
-    "Intersection 157",
-    "Intersection 24",
-    "Intersection 386",
-    "Intersection 237",
-    "Intersection 254",
-    "Intersection 378",
-    "Intersection 49",
-    "Intersection 297",
-    "Intersection 356",
-    "Intersection 74",
-    "Intersection 349",
-    "Intersection 355",
-    "Intersection 279",
-    "Intersection 295",
-    "Intersection 288",
-    "Intersection 371",
-    "Intersection 266",
-    "Intersection 128",
-    "Intersection 240",
-    "Intersection 370",
-    "Intersection 291",
-    "Intersection 337",
-    "Intersection 260",
-    "Intersection 363",
-    "Intersection 306",
-    "Intersection 276",
-    "Intersection 352",
-    "Intersection 140",
-    "Intersection 289",
-    "Intersection 228",
-    "Intersection 95",
-    "Intersection 277",
-    "Intersection 137",
-    "Intersection 136",
-    "Intersection 324",
-    "Intersection 258",
-    "Intersection 119",
-    "Intersection 132",
-    "Intersection 16",
-    "Intersection 66",
-    "Intersection 139",
-    "Intersection 28",
-    "Intersection 229",
-    "Intersection 123",
-    "Intersection 133",
-    "Intersection 292",
-    "Intersection 2",
-    "Intersection 328",
-    "Intersection 251",
-    "Intersection 264",
-    "Intersection 127",
-    "Intersection 124",
-    "Intersection 293",
-    "Intersection 310",
-    "Intersection 121",
-    "Intersection 205",
-    "Intersection 23",
-    "Intersection 262",
-    "Intersection 71",
-    "Intersection 3",
-    "Intersection 122",
-    "Intersection 304",
-    "Intersection 232",
-    "Intersection 154",
-    "Intersection 309",
-    "Intersection 231",
-    "Intersection 389",
-    "Intersection 244",
-    "Intersection 179",
-    "Intersection 332",
-    "Intersection 259",
-    "Intersection 330",
-    "Intersection 333",
-    "Intersection 338",
-    "Intersection 343",
-    "Intersection 177",
-    "Intersection 267",
-    "Intersection 112",
-    "Intersection 134",
-    "Intersection 298",
-    "Intersection 350",
-    "Intersection 255",
-    "Intersection 314",
-    "Intersection 45",
-    "Intersection 82",
-    "Intersection 313",
-    "Intersection 357",
-    "Intersection 256",
-    "Intersection 169",
-    "Intersection 72",
-    "Intersection 147",
-    "Intersection 152",
-    "Intersection 347",
-    "Intersection 336",
-    "Intersection 217",
-    "Intersection 367",
-    "Intersection 280",
-    "Intersection 73",
-    "Intersection 46",
-    "Intersection 61",
-    "Intersection 43",
-    "Intersection 346",
-    "Intersection 35",
-    "Intersection 38",
-    "Intersection 39",
-    "Intersection 144",
-    "Intersection 149",
-    "Intersection 211",
-    "Intersection 41",
-    "Intersection 151",
-    "Intersection 37",
-    "Intersection 40",
-    "Intersection 42",
-    "Intersection 145",
-    "Intersection 374",
-    "Intersection 334",
-    "Intersection 331",
-    "Intersection 153",
-    "Intersection 385",
-    "Intersection 69",
-    "Intersection 146",
-    "Intersection 247",
-    "Intersection 234",
-    "Intersection 214",
-    "Intersection 235",
-    "Intersection 246",
-    "Intersection 111",
-    "Intersection 43",
-    "Intersection 265",
-    "Intersection 253",
-    "Intersection 296",
-    "Intersection 354",
-    "Intersection 312",
-    "Intersection 329",
-    "Intersection 344",
-    "Intersection 365",
-    "Intersection 163",
-    "Intersection 358",
-    "Intersection 52",
-    "Intersection 65",
-    "Intersection 68",
-    "Intersection 148",
-    "Intersection 54",
-    "Intersection 381",
-    "Intersection 143",
-    "Intersection 257",
-    "Intersection 300",
-    "Intersection 284",
-    "Intersection 171",
-    "Intersection 170",
-    "Intersection 194",
-    "Intersection 7",
-    "Intersection 84",
-    "Intersection 62",
-    "Intersection 250",
-    "Intersection 172",
-    "Intersection 273",
-    "Intersection 248",
-    "Intersection 212",
-    "Intersection 193",
-    "Intersection 285",
-    "Intersection 221",
-    "Intersection 382",
-    "Intersection 316",
-    "Intersection 202",
-    "Intersection 383",
-    "Intersection 130",
-    "Intersection 287",
-    "Intersection 20",
-    "Intersection 302",
-    "Intersection 286",
-    "Intersection 317",
-    "Intersection 274",
-    "Intersection 53",
-    "Intersection 325",
-    "Intersection 303",
-    "Intersection 376",
-    "Intersection 390",
-    "Intersection 335",
-    "Intersection 185",
-    "Intersection 142",
-    "Intersection 305",
-    "Intersection 281",
-    "Intersection 282",
-    "Intersection 63",
-    "Intersection 299",
-    "Intersection 368",
-    "Intersection 375",
-    "Intersection 223",
-    "Intersection 321",
-    "Intersection 380",
-    "Intersection 360",
-    "Intersection 307",
-    "Intersection 110",
+    "Centerline Intersection 56",
+    "Centerline Intersection 162",
+    "Centerline Intersection 372",
+    "Centerline Intersection 261",
+    "Centerline Intersection 369",
+    "Centerline Intersection 361",
+    "Centerline Intersection 387",
+    "Centerline Intersection 318",
+    "Centerline Intersection 377",
+    "Centerline Intersection 117",
+    "Centerline Intersection 50",
+    "Centerline Intersection 364",
+    "Centerline Intersection 198",
+    "Centerline Intersection 165",
+    "Centerline Intersection 4",
+    "Centerline Intersection 348",
+    "Centerline Intersection 311",
+    "Centerline Intersection 159",
+    "Centerline Intersection 88",
+    "Centerline Intersection 320",
+    "Centerline Intersection 125",
+    "Centerline Intersection 373",
+    "Centerline Intersection 15",
+    "Centerline Intersection 384",
+    "Centerline Intersection 319",
+    "Centerline Intersection 101",
+    "Centerline Intersection 323",
+    "Centerline Intersection 322",
+    "Centerline Intersection 226",
+    "Centerline Intersection 294",
+    "Centerline Intersection 138",
+    "Centerline Intersection 388",
+    "Centerline Intersection 290",
+    "Centerline Intersection 308",
+    "Centerline Intersection 97",
+    "Centerline Intersection 362",
+    "Centerline Intersection 157",
+    "Centerline Intersection 24",
+    "Centerline Intersection 386",
+    "Centerline Intersection 237",
+    "Centerline Intersection 254",
+    "Centerline Intersection 378",
+    "Centerline Intersection 49",
+    "Centerline Intersection 297",
+    "Centerline Intersection 356",
+    "Centerline Intersection 74",
+    "Centerline Intersection 349",
+    "Centerline Intersection 355",
+    "Centerline Intersection 279",
+    "Centerline Intersection 295",
+    "Centerline Intersection 288",
+    "Centerline Intersection 371",
+    "Centerline Intersection 266",
+    "Centerline Intersection 128",
+    "Centerline Intersection 240",
+    "Centerline Intersection 370",
+    "Centerline Intersection 291",
+    "Centerline Intersection 337",
+    "Centerline Intersection 260",
+    "Centerline Intersection 363",
+    "Centerline Intersection 306",
+    "Centerline Intersection 276",
+    "Centerline Intersection 352",
+    "Centerline Intersection 140",
+    "Centerline Intersection 289",
+    "Centerline Intersection 228",
+    "Centerline Intersection 95",
+    "Centerline Intersection 277",
+    "Centerline Intersection 137",
+    "Centerline Intersection 136",
+    "Centerline Intersection 324",
+    "Centerline Intersection 258",
+    "Centerline Intersection 119",
+    "Centerline Intersection 132",
+    "Centerline Intersection 16",
+    "Centerline Intersection 66",
+    "Centerline Intersection 139",
+    "Centerline Intersection 28",
+    "Centerline Intersection 229",
+    "Centerline Intersection 123",
+    "Centerline Intersection 133",
+    "Centerline Intersection 292",
+    "Centerline Intersection 2",
+    "Centerline Intersection 328",
+    "Centerline Intersection 251",
+    "Centerline Intersection 264",
+    "Centerline Intersection 127",
+    "Centerline Intersection 124",
+    "Centerline Intersection 293",
+    "Centerline Intersection 310",
+    "Centerline Intersection 121",
+    "Centerline Intersection 205",
+    "Centerline Intersection 23",
+    "Centerline Intersection 262",
+    "Centerline Intersection 71",
+    "Centerline Intersection 3",
+    "Centerline Intersection 122",
+    "Centerline Intersection 304",
+    "Centerline Intersection 232",
+    "Centerline Intersection 154",
+    "Centerline Intersection 309",
+    "Centerline Intersection 231",
+    "Centerline Intersection 389",
+    "Centerline Intersection 244",
+    "Centerline Intersection 179",
+    "Centerline Intersection 332",
+    "Centerline Intersection 259",
+    "Centerline Intersection 330",
+    "Centerline Intersection 333",
+    "Centerline Intersection 338",
+    "Centerline Intersection 343",
+    "Centerline Intersection 177",
+    "Centerline Intersection 267",
+    "Centerline Intersection 112",
+    "Centerline Intersection 134",
+    "Centerline Intersection 298",
+    "Centerline Intersection 350",
+    "Centerline Intersection 255",
+    "Centerline Intersection 314",
+    "Centerline Intersection 45",
+    "Centerline Intersection 82",
+    "Centerline Intersection 313",
+    "Centerline Intersection 357",
+    "Centerline Intersection 256",
+    "Centerline Intersection 169",
+    "Centerline Intersection 72",
+    "Centerline Intersection 147",
+    "Centerline Intersection 152",
+    "Centerline Intersection 347",
+    "Centerline Intersection 336",
+    "Centerline Intersection 217",
+    "Centerline Intersection 367",
+    "Centerline Intersection 280",
+    "Centerline Intersection 73",
+    "Centerline Intersection 46",
+    "Centerline Intersection 61",
+    "Centerline Intersection 43",
+    "Centerline Intersection 346",
+    "Centerline Intersection 35",
+    "Centerline Intersection 38",
+    "Centerline Intersection 39",
+    "Centerline Intersection 144",
+    "Centerline Intersection 149",
+    "Centerline Intersection 211",
+    "Centerline Intersection 41",
+    "Centerline Intersection 151",
+    "Centerline Intersection 37",
+    "Centerline Intersection 40",
+    "Centerline Intersection 42",
+    "Centerline Intersection 145",
+    "Centerline Intersection 374",
+    "Centerline Intersection 334",
+    "Centerline Intersection 331",
+    "Centerline Intersection 153",
+    "Centerline Intersection 385",
+    "Centerline Intersection 69",
+    "Centerline Intersection 146",
+    "Centerline Intersection 247",
+    "Centerline Intersection 234",
+    "Centerline Intersection 214",
+    "Centerline Intersection 235",
+    "Centerline Intersection 246",
+    "Centerline Intersection 111",
+    "Centerline Intersection 43",
+    "Centerline Intersection 265",
+    "Centerline Intersection 253",
+    "Centerline Intersection 296",
+    "Centerline Intersection 354",
+    "Centerline Intersection 312",
+    "Centerline Intersection 329",
+    "Centerline Intersection 344",
+    "Centerline Intersection 365",
+    "Centerline Intersection 163",
+    "Centerline Intersection 358",
+    "Centerline Intersection 52",
+    "Centerline Intersection 65",
+    "Centerline Intersection 68",
+    "Centerline Intersection 148",
+    "Centerline Intersection 54",
+    "Centerline Intersection 381",
+    "Centerline Intersection 143",
+    "Centerline Intersection 257",
+    "Centerline Intersection 300",
+    "Centerline Intersection 284",
+    "Centerline Intersection 171",
+    "Centerline Intersection 170",
+    "Centerline Intersection 194",
+    "Centerline Intersection 7",
+    "Centerline Intersection 84",
+    "Centerline Intersection 62",
+    "Centerline Intersection 250",
+    "Centerline Intersection 172",
+    "Centerline Intersection 273",
+    "Centerline Intersection 248",
+    "Centerline Intersection 212",
+    "Centerline Intersection 193",
+    "Centerline Intersection 285",
+    "Centerline Intersection 221",
+    "Centerline Intersection 382",
+    "Centerline Intersection 316",
+    "Centerline Intersection 202",
+    "Centerline Intersection 383",
+    "Centerline Intersection 130",
+    "Centerline Intersection 287",
+    "Centerline Intersection 20",
+    "Centerline Intersection 302",
+    "Centerline Intersection 286",
+    "Centerline Intersection 317",
+    "Centerline Intersection 274",
+    "Centerline Intersection 53",
+    "Centerline Intersection 325",
+    "Centerline Intersection 303",
+    "Centerline Intersection 376",
+    "Centerline Intersection 390",
+    "Centerline Intersection 335",
+    "Centerline Intersection 185",
+    "Centerline Intersection 142",
+    "Centerline Intersection 305",
+    "Centerline Intersection 281",
+    "Centerline Intersection 282",
+    "Centerline Intersection 63",
+    "Centerline Intersection 299",
+    "Centerline Intersection 368",
+    "Centerline Intersection 375",
+    "Centerline Intersection 223",
+    "Centerline Intersection 321",
+    "Centerline Intersection 380",
+    "Centerline Intersection 360",
+    "Centerline Intersection 307",
+    "Centerline Intersection 110",
     "Intersection 1",
-    "Intersection 64",
-    "Intersection 60",
-    "Intersection 160",
-    "Intersection 327",
-    "Intersection 190",
-    "Intersection 366",
-    "Intersection 379",
-    "Intersection 85",
-    "Intersection 252",
-    "Intersection 141",
-    "Intersection 34",
-    "Intersection 315",
-    "Intersection 118",
-    "Intersection 51",
-    "Intersection 271",
-    "Intersection 391",
-    "Intersection 249",
-    "Intersection 126",
-    "Intersection 92",
-    "Intersection 239",
-    "Intersection 359",
-    "Intersection 351",
-    "Intersection 268", # It doesn't seem to be anIntersection
-    "Intersection 36", # It doesn't seem to be anIntersection
-    "Intersection 197", # It doesn't seem to be anIntersection
-    "Intersection 269", # It doesn't seem to be anIntersection
-    "Intersection 135", # It doesn't seem to be anIntersection
+    "Centerline Intersection 64",
+    "Centerline Intersection 60",
+    "Centerline Intersection 160",
+    "Centerline Intersection 327",
+    "Centerline Intersection 190",
+    "Centerline Intersection 366",
+    "Centerline Intersection 379",
+    "Centerline Intersection 85",
+    "Centerline Intersection 252",
+    "Centerline Intersection 141",
+    "Centerline Intersection 34",
+    "Centerline Intersection 315",
+    "Centerline Intersection 118",
+    "Centerline Intersection 51",
+    "Centerline Intersection 271",
+    "Centerline Intersection 391",
+    "Centerline Intersection 249",
+    "Centerline Intersection 126",
+    "Centerline Intersection 92",
+    "Centerline Intersection 239",
+    "Centerline Intersection 359",
+    "Centerline Intersection 351",
+    "Centerline Intersection 268", # It doesn't seem to be an intersection
+    "Centerline Intersection 36", # It doesn't seem to be an intersection
+    "Centerline Intersection 197", # It doesn't seem to be an intersection
+    "Centerline Intersection 269", # It doesn't seem to be an intersection
+    "Centerline Intersection 135", # It doesn't seem to be an intersection
 
 
 }
 
 MANUAL_MOVE_INTERSECTIONS = {
     # name: (x_offset_m, y_offset_m)
-    "Intersection 70": (5, -45),
-    "Intersection 161": (-35, 25),
-    "Intersection 75": (50, 25),
-    "Intersection 32": (5, -10),
-    "Intersection 107": (-100, -80),
-    "Intersection 278": (30, 0), # should change the polygon shape, but moving it is a temporary fix
-    "Intersection 242": (-30, 0),
-    "Intersection 131": (40, 0),
-    "Intersection 197": (-60, 40),
-    "Intersection 1": (10, 40),
-    "Intersection 86": (20, -30),
-    "Intersection 77": (-20, 10),
-    "Intersection 78": (-20, -70),
-    "Intersection 155": (10, -60),
-    "Intersection 168": (-20, 60),
-    "Intersection 30": (30, 50),
-    "Intersection 150": (880, -170),
-    "Intersection 208": (170, 0),
-    "Intersection 326": (80, -110),
-    "Intersection 301": (-110, 20),
-    "Intersection 96": (-30, -10),
-    "Intersection 114": (-70, -10),
-    "Intersection 283": (-170, 80),
-    "Intersection 14": (5, -25),
-    "Intersection 272": (250, 200),
-    "Intersection 81": (-50, 20),
-    "Intersection 11": (100, -50),
-    "Intersection 27": (-700, -600),
-    "Intersection 220": (100, 10),
-    "Intersection 340": (300, -350),
-    "Intersection 275": (645, 340),
-    "Intersection 90": (-70, 10),
-    "Intersection 109": (-20, -10), 
-    "Intersection 222": (0, 50), 
-    "Intersection 58": (-40, 20), 
-    "Intersection 44": (-20, -30), 
-    "Intersection 89": (10, 10), 
-    "Intersection 48": (20, -10), 
-    "Intersection 263": (-30, 0), 
-    "Intersection 47": (30, -10), 
-    "Intersection 6": (0, 60), 
-    "Intersection 8": (-90, 0), 
-    "Intersection 216": (30, -10), 
-    "Intersection 156": (-20, -30), 
-    "Intersection 83": (0, 20), 
-    "Intersection 219": (0, -10), 
-    "Intersection 218": (0, -10),
+    "Centerline Intersection 70": (5, -45),
+    "Centerline Intersection 161": (-35, 25),
+    "Centerline Intersection 75": (50, 25),
+    "Centerline Intersection 32": (5, -10),
+    "Centerline Intersection 107": (-100, -80),
+    "Centerline Intersection 278": (30, 0), # should change the polygon shape, but moving it is a temporary fix
+    "Centerline Intersection 242": (-30, 0),
+    "Centerline Intersection 131": (40, 0),
+    "Centerline Intersection 197": (-60, 40),
+    "Centerline Intersection 1": (10, 40),
+    "Centerline Intersection 86": (20, -30),
+    "Centerline Intersection 77": (-20, 10),
+    "Centerline Intersection 78": (-20, -70),
+    "Centerline Intersection 155": (10, -60),
+    "Centerline Intersection 168": (-20, 60),
+    "Centerline Intersection 30": (30, 50),
+    "Centerline Intersection 150": (880, -170),
+    "Centerline Intersection 208": (170, 0),
+    "Centerline Intersection 326": (80, -110),
+    "Centerline Intersection 301": (-110, 20),
+    "Centerline Intersection 96": (-30, -10),
+    "Centerline Intersection 114": (-70, -10),
+    "Centerline Intersection 283": (-170, 80),
+    "Centerline Intersection 14": (5, -25),
+    "Centerline Intersection 272": (250, 200),
+    "Centerline Intersection 81": (-50, 20),
+    "Centerline Intersection 11": (100, -50),
+    "Centerline Intersection 27": (-700, -600),
+    "Centerline Intersection 220": (100, 10),
+    "Centerline Intersection 340": (300, -350),
+    "Centerline Intersection 275": (645, 340),
+    "Centerline Intersection 90": (-70, 10),
+    "Centerline Intersection 109": (-20, -10), 
+    "Centerline Intersection 222": (0, 50), 
+    "Centerline Intersection 58": (-40, 20), 
+    "Centerline Intersection 44": (-20, -30), 
+    "Centerline Intersection 89": (10, 10), 
+    "Centerline Intersection 48": (20, -10), 
+    "Centerline Intersection 263": (-30, 0), 
+    "Centerline Intersection 47": (30, -10), 
+    "Centerline Intersection 6": (0, 60), 
+    "Centerline Intersection 8": (-90, 0), 
+    "Centerline Intersection 216": (30, -10), 
+    "Centerline Intersection 156": (-20, -30), 
+    "Centerline Intersection 83": (0, 20), 
+    "Centerline Intersection 219": (0, -10), 
+    "Centerline Intersection 218": (0, -10),
+    "Centerline Intersection 5": (20, -30),
 }
 
 # -----------------------------
-# SWAPIntersectionS
+# SWAP INTERSECTIONS
 # -----------------------------
-# Swap the geometry of two detectedIntersections.
+# Swap the geometry of two detected intersections.
 MANUAL_SWAP_INTERSECTIONS = [
     # (
-    #     "Intersection 70",
-    #     "Intersection 161",
+    #     "Centerline Intersection 70",
+    #     "Centerline Intersection 161",
     # ),
 ]
 
 # -----------------------------
-# COPYIntersectionS
+# COPY INTERSECTIONS
 # -----------------------------
-# Copy an existing polygon and create a newIntersection.
+# Copy an existing polygon and create a new intersection.
 #
 # offset_xy is in SOURCE_CRS metres.
 MANUAL_COPY_INTERSECTIONS = [
     {
-        "SOURCE": "Intersection 241",
-        "NEW_NAME": "Intersection 500",
+        "SOURCE": "Centerline Intersection 241",
+        "NEW_NAME": "Centerline Intersection 500",
         "OFFSET_XY": (380, -80),
     },
     {
-        "SOURCE": "Intersection 242",
-        "NEW_NAME": "Intersection 501",
+        "SOURCE": "Centerline Intersection 242",
+        "NEW_NAME": "Centerline Intersection 501",
         "OFFSET_XY": (100, -20),
     },
     {
-        "SOURCE": "Intersection 213",
-        "NEW_NAME": "Intersection 502",
+        "SOURCE": "Centerline Intersection 213",
+        "NEW_NAME": "Centerline Intersection 502",
         "OFFSET_XY": (760, 150),
     },
     {
-        "SOURCE": "Intersection 96",
-        "NEW_NAME": "Intersection 503",
+        "SOURCE": "Centerline Intersection 96",
+        "NEW_NAME": "Centerline Intersection 503",
         "OFFSET_XY": (100, 20),
     },
     
     {
-        "SOURCE": "Intersection 96",
-        "NEW_NAME": "Intersection 504",
+        "SOURCE": "Centerline Intersection 96",
+        "NEW_NAME": "Centerline Intersection 504",
         "OFFSET_XY": (180, 34),
     },
     {
-        "SOURCE": "Intersection 26",
-        "NEW_NAME": "Intersection 505",
+        "SOURCE": "Centerline Intersection 26",
+        "NEW_NAME": "Centerline Intersection 505",
         "OFFSET_XY": (605, -250),
     },
     {
-        "SOURCE": "Intersection 26",
-        "NEW_NAME": "Intersection 506",
+        "SOURCE": "Centerline Intersection 26",
+        "NEW_NAME": "Centerline Intersection 506",
         "OFFSET_XY": (530, -220),
     },
     {
-        "SOURCE": "Intersection 114",
-        "NEW_NAME": "Intersection 507",
+        "SOURCE": "Centerline Intersection 114",
+        "NEW_NAME": "Centerline Intersection 507",
         "OFFSET_XY": (140, 0),
     },
     {
-        "SOURCE": "Intersection 283",
-        "NEW_NAME": "Intersection 508",
+        "SOURCE": "Centerline Intersection 283",
+        "NEW_NAME": "Centerline Intersection 508",
         "OFFSET_XY": (-160, 100),
     },
     {
-        "SOURCE": "Intersection 14",
-        "NEW_NAME": "Intersection 509",
+        "SOURCE": "Centerline Intersection 14",
+        "NEW_NAME": "Centerline Intersection 509",
         "OFFSET_XY": (-10, 270),
     },
     {
-        "SOURCE": "Intersection 76",
-        "NEW_NAME": "Intersection 510",
+        "SOURCE": "Centerline Intersection 76",
+        "NEW_NAME": "Centerline Intersection 510",
         "OFFSET_XY": (-10, -100),
     },
     {
-        "SOURCE": "Intersection 90",
-        "NEW_NAME": "Intersection 511",
+        "SOURCE": "Centerline Intersection 90",
+        "NEW_NAME": "Centerline Intersection 511",
         "OFFSET_XY": (50, -150),
     },
     {
-        "SOURCE": "Intersection 220",
-        "NEW_NAME": "Intersection 512",
+        "SOURCE": "Centerline Intersection 220",
+        "NEW_NAME": "Centerline Intersection 512",
         "OFFSET_XY": (150, 0),
     },
     {
-        "SOURCE": "Intersection 220",
-        "NEW_NAME": "Intersection 513",
+        "SOURCE": "Centerline Intersection 220",
+        "NEW_NAME": "Centerline Intersection 513",
         "OFFSET_XY": (310, 0),
     },
     {
-        "SOURCE": "Intersection 90",
-        "NEW_NAME": "Intersection 514",
+        "SOURCE": "Centerline Intersection 90",
+        "NEW_NAME": "Centerline Intersection 514",
         "OFFSET_XY": (100, 0),
     },
     {
-        "SOURCE": "Intersection 58",
-        "NEW_NAME": "Intersection 515",
+        "SOURCE": "Centerline Intersection 58",
+        "NEW_NAME": "Centerline Intersection 515",
         "OFFSET_XY": (95, -80),
     },
     {
-        "SOURCE": "Intersection 44",
-        "NEW_NAME": "Intersection 516",
+        "SOURCE": "Centerline Intersection 44",
+        "NEW_NAME": "Centerline Intersection 516",
         "OFFSET_XY": (80, 100),
     },
     {
-        "SOURCE": "Intersection 99",
-        "NEW_NAME": "Intersection 517",
+        "SOURCE": "Centerline Intersection 99",
+        "NEW_NAME": "Centerline Intersection 517",
         "OFFSET_XY": (120, 180),
     },
     {
-        "SOURCE": "Intersection 180",
-        "NEW_NAME": "Intersection 518",
+        "SOURCE": "Centerline Intersection 180",
+        "NEW_NAME": "Centerline Intersection 518",
         "OFFSET_XY": (-150, 40),
     },
     {
-        "SOURCE": "Intersection 99",
-        "NEW_NAME": "Intersection 519",
+        "SOURCE": "Centerline Intersection 99",
+        "NEW_NAME": "Centerline Intersection 519",
         "OFFSET_XY": (480, -150),
     },
     {
-        "SOURCE": "Intersection 208",
-        "NEW_NAME": "Intersection 520",
+        "SOURCE": "Centerline Intersection 208",
+        "NEW_NAME": "Centerline Intersection 520",
         "OFFSET_XY": (400, -620),
     },
     {
-        "SOURCE": "Intersection 150",
-        "NEW_NAME": "Intersection 521",
+        "SOURCE": "Centerline Intersection 150",
+        "NEW_NAME": "Centerline Intersection 521",
         "OFFSET_XY": (-600, -400),
     },
     {
-        "SOURCE": "Intersection 156",
-        "NEW_NAME": "Intersection 522",
+        "SOURCE": "Centerline Intersection 156",
+        "NEW_NAME": "Centerline Intersection 522",
         "OFFSET_XY": (120, 0),
+    },
+    {
+        "SOURCE": "Centerline Intersection 158",
+        "NEW_NAME": "Centerline Intersection 523",
+        "OFFSET_XY": (610, -130),
+    },
+    {
+        "SOURCE": "Centerline Intersection 206",
+        "NEW_NAME": "Centerline Intersection 524",
+        "OFFSET_XY": (0, 95),
     },
 ]
 
@@ -585,7 +604,7 @@ MANUAL_COPY_INTERSECTIONS = [
 # Coordinates must be SOURCE_CRS metres.
 # This is useful when moving is not enough and the shape itself is wrong.
 MANUAL_REPLACE_INTERSECTION_POLYGONS = {
-    # "Intersection 70": Polygon([
+    # "Centerline Intersection 70": Polygon([
     #     (482000, 7513000),
     #     (482050, 7513000),
     #     (482050, 7513050),
@@ -594,11 +613,11 @@ MANUAL_REPLACE_INTERSECTION_POLYGONS = {
     # ]),
 }
 
-# Optional: add completely newIntersections that were missed by the detector.
+# Optional: add completely new intersections that were missed by the detector.
 # Coordinates must be SOURCE_CRS metres.
 MANUAL_ADD_INTERSECTION_POLYGONS = [
     # (
-    #     "ManualIntersection A",
+    #     "Manual Intersection A",
     #     Polygon([
     #         (482000, 7513000),
     #         (482050, 7513000),
@@ -610,7 +629,7 @@ MANUAL_ADD_INTERSECTION_POLYGONS = [
 ]
 
 PRINT_INTERSECTIONS_POLYGONS = {
-    "Intersection 242",
+    "Centerline Intersection 242",
 }
 # -----------------------------
 # HELPER FUNCTION
@@ -665,21 +684,21 @@ def load_dxf_lanes(dxf_path):
     return dxf_gdf
 
 # -----------------------------
-# DETECTIntersectionS (HYBRID)
+# DETECT INTERSECTIONS (HYBRID)
 # -----------------------------
 def detect_intersections_hybrid(lane_gdf):
-    # _outputs = detect_intersections_with__package(DXF_PATH)
-    # _intersections = _outputs["intersections"]
-    _intersections = detect_intersections_from_dxf_lanes(lane_gdf)
+    # centerline_outputs = detect_intersections_with_centerline_package(DXF_PATH)
+    # centerline_intersections = centerline_outputs["intersections"]
+    centerline_intersections = detect_intersections_from_dxf_lanes(lane_gdf)
     fallback_intersections = empty_intersection_gdf()
 
     combined = pd.concat(
-        [_intersections, fallback_intersections],
+        [centerline_intersections, fallback_intersections],
         ignore_index=True,
     )
 
     if combined.empty:
-        return _intersections
+        return centerline_intersections
 
     combined = gpd.GeoDataFrame(
         combined,
@@ -709,7 +728,7 @@ def detect_intersections_hybrid(lane_gdf):
         merged_polygon = nearby.geometry.union_all().convex_hull.buffer(0)
 
         final_records.append({
-            "INTERSECTION_NAME": f"HybridIntersection {len(final_records) + 1}",
+            "INTERSECTION_NAME": f"Hybrid Intersection {len(final_records) + 1}",
             "DETECTION_METHOD": ",".join(
                 sorted(set(nearby.get("DETECTION_METHOD", pd.Series(["unknown"])).fillna("unknown")))
             ),
@@ -727,7 +746,7 @@ def detect_intersections_hybrid(lane_gdf):
     return result
 
 # -----------------------------
-#  / GRAPHIntersection DETECTOR
+# CENTERLINE / GRAPH INTERSECTION DETECTOR
 # -----------------------------
 def empty_intersection_gdf(crs=TARGET_CRS):
     return gpd.GeoDataFrame(
@@ -842,14 +861,14 @@ def _create_road_polygons_from_lanes(lane_gdf, buffer_m=ROAD_POLYGON_BUFFER_METR
     )
 
 
-def _generate_s_from_road_polygons(
+def _generate_centerlines_from_road_polygons(
     road_polygon_gdf,
-    interpolation_distance=_INTERPOLATION_DISTANCE,
+    interpolation_distance=CENTERLINE_INTERPOLATION_DISTANCE,
 ):
-    if  is None:
+    if Centerline is None:
         raise ImportError(
-            "The  package is not installed. Install it with: "
-            "pip install  networkx"
+            "The centerline package is not installed. Install it with: "
+            "pip install centerline networkx"
         )
 
     records = []
@@ -861,7 +880,7 @@ def _generate_s_from_road_polygons(
             continue
 
         try:
-            centreline_obj = (
+            centreline_obj = Centerline(
                 polygon,
                 interpolation_distance=interpolation_distance,
             )
@@ -869,7 +888,7 @@ def _generate_s_from_road_polygons(
 
         except Exception as exc:
             debug_log(
-                f" failed for road polygon {row.get('ROAD_POLYGON_ID', '-')}",
+                f"Centerline failed for road polygon {row.get('ROAD_POLYGON_ID', '-')}",
                 exc,
             )
             continue
@@ -909,11 +928,11 @@ def _generate_s_from_road_polygons(
     return _explode_lines(centreline_gdf)
 
 
-def _build__graph(_gdf):
+def _build_centerline_graph(centerline_gdf):
     graph = nx.Graph()
     segment_records = []
 
-    for _, row in _gdf.iterrows():
+    for _, row in centerline_gdf.iterrows():
         line = row.geometry
 
         if line is None or line.is_empty:
@@ -967,15 +986,15 @@ def _build__graph(_gdf):
     return graph, segment_gdf
 
 
-def detect_intersections_from_s(
-    _segments_gdf,
+def detect_intersections_from_centerlines(
+    centerline_segments_gdf,
     graph,
     min_graph_degree=MIN_GRAPH_DEGREE,
     cluster_buffer_m=INTERSECTION_CLUSTER_BUFFER_METRES,
     polygon_radius_m=INTERSECTION_POLYGON_RADIUS_METRES,
     polygon_buffer_m=INTERSECTION_POLYGON_BUFFER_METRES,
 ):
-    if _segments_gdf.empty or graph.number_of_nodes() == 0:
+    if centerline_segments_gdf.empty or graph.number_of_nodes() == 0:
         return empty_intersection_gdf()
 
     junction_records = []
@@ -1031,8 +1050,8 @@ def detect_intersections_from_s(
         cluster_centre = cluster_nodes.geometry.union_all().centroid
         local_area = cluster_centre.buffer(polygon_radius_m)
 
-        nearby_segments = _segments_gdf[
-            _segments_gdf.geometry.intersects(local_area)
+        nearby_segments = centerline_segments_gdf[
+            centerline_segments_gdf.geometry.intersects(local_area)
         ].copy()
 
         if nearby_segments.empty:
@@ -1049,7 +1068,7 @@ def detect_intersections_from_s(
         if direction_group_count < MIN_DIRECTION_GROUPS:
             continue
 
-      Intersection_polygon = (
+        intersection_polygon = (
             nearby_segments.geometry
             .intersection(local_area)
             .buffer(polygon_buffer_m, cap_style=2, join_style=2)
@@ -1058,24 +1077,24 @@ def detect_intersections_from_s(
             .buffer(0)
         )
 
-        ifIntersection_polygon.is_empty:
+        if intersection_polygon.is_empty:
             continue
 
-        marker_point =Intersection_polygon.centroid
+        marker_point = intersection_polygon.centroid
 
         records.append({
-            "INTERSECTION_NAME": f"Intersection {len(records) + 1}",
+            "INTERSECTION_NAME": f"Centerline Intersection {len(records) + 1}",
             "INTERSECTION_X": marker_point.x,
             "INTERSECTION_Y": marker_point.y,
             "GRAPH_NODE_COUNT": int(graph_node_count),
             "MAX_GRAPH_DEGREE": int(max_graph_degree),
             "BRANCH_COUNT": int(branch_count),
             "DIRECTION_GROUP_COUNT": int(direction_group_count),
-            "geometry":Intersection_polygon,
+            "geometry": intersection_polygon,
         })
 
     if not records:
-        debug_log("No centreline graphIntersection clusters passed thresholds")
+        debug_log("No centreline graph intersection clusters passed thresholds")
         return empty_intersection_gdf()
 
     result = gpd.GeoDataFrame(
@@ -1090,14 +1109,14 @@ def detect_intersections_from_s(
     ).reset_index(drop=True)
 
     result["INTERSECTION_NAME"] = [
-        f"Intersection {idx + 1}"
+        f"Centerline Intersection {idx + 1}"
         for idx in range(len(result))
     ]
 
-    result["DETECTION_METHOD"] = "_GRAPH"
+    result["DETECTION_METHOD"] = "CENTERLINE_GRAPH"
 
     debug_log(
-        "Detected centreline graphIntersections",
+        "Detected centreline graph intersections",
         result[[
             "INTERSECTION_NAME",
             "GRAPH_NODE_COUNT",
@@ -1112,7 +1131,7 @@ def detect_intersections_from_s(
 
 def detect_intersections_from_dxf_lanes(lane_gdf):
     """
-    DetectIntersections by converting lane LineStrings into road polygons,
+    Detect intersections by converting lane LineStrings into road polygons,
     creating centrelines, building a graph, and finding compact graph junctions.
     This replaces the old ST_DWITHIN lane self-join detector.
     """
@@ -1127,26 +1146,26 @@ def detect_intersections_from_dxf_lanes(lane_gdf):
         return empty_intersection_gdf()
 
     debug_log("Generating road centrelines")
-    _gdf = _generate_s_from_road_polygons(road_polygon_gdf)
-    debug_log("Generated centrelines", _gdf)
+    centerline_gdf = _generate_centerlines_from_road_polygons(road_polygon_gdf)
+    debug_log("Generated centrelines", centerline_gdf)
 
-    if _gdf.empty:
+    if centerline_gdf.empty:
         return empty_intersection_gdf()
 
     debug_log("Building centreline graph")
-    graph, _segments_gdf = _build__graph(_gdf)
+    graph, centerline_segments_gdf = _build_centerline_graph(centerline_gdf)
     debug_log("Graph node/edge count", {
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
     })
 
-    return detect_intersections_from_s(
-        _segments_gdf=_segments_gdf,
+    return detect_intersections_from_centerlines(
+        centerline_segments_gdf=centerline_segments_gdf,
         graph=graph,
     )
 
 
-def export_intersections_csv(intersection_gdf, output_path="detected__intersections.csv"):
+def export_intersections_csv(intersection_gdf, output_path="detected_centerline_intersections.csv"):
     columns = [
         "INTERSECTION_NAME",
         "INTERSECTION_X",
@@ -1160,11 +1179,11 @@ def export_intersections_csv(intersection_gdf, output_path="detected__intersecti
         "geometry_wkt",
     ]
 
-    ifIntersection_gdf.empty:
+    if intersection_gdf.empty:
         pd.DataFrame(columns=columns).to_csv(output_path, index=False)
         return
 
-    export_df =Intersection_gdf.copy()
+    export_df = intersection_gdf.copy()
     export_df["geometry_wkt"] = export_df.geometry.to_wkt()
 
     for column in columns:
@@ -1177,7 +1196,7 @@ def export_intersections_csv(intersection_gdf, output_path="detected__intersecti
 
 def apply_manual_intersection_edits(intersection_gdf):
     """
-    Apply manual DELETE / MOVE / REPLACE / ADD rules to detectedIntersections.
+    Apply manual DELETE / MOVE / REPLACE / ADD rules to detected intersections.
 
     This is intentionally applied after the automatic detector, so you can keep
     improving the detector while still maintaining operationally approved
@@ -1195,14 +1214,14 @@ def apply_manual_intersection_edits(intersection_gdf):
         "MANUAL_EDIT",
     ]
 
-    ifIntersection_gdf is None orIntersection_gdf.empty:
+    if intersection_gdf is None or intersection_gdf.empty:
         edited = gpd.GeoDataFrame(
             {column: [] for column in expected_columns},
             geometry=[],
             crs=TARGET_CRS,
         )
     else:
-        edited =Intersection_gdf.copy()
+        edited = intersection_gdf.copy()
         edited = gpd.GeoDataFrame(edited, geometry="geometry", crs=intersection_gdf.crs)
         edited = edited.to_crs(SOURCE_CRS)
 
@@ -1217,8 +1236,8 @@ def apply_manual_intersection_edits(intersection_gdf):
         ].copy()
 
         # REPLACE: replace polygon geometry entirely.
-        forIntersection_name, replacement_polygon in MANUAL_REPLACE_INTERSECTION_POLYGONS.items():
-            mask = edited["INTERSECTION_NAME"].astype(str) ==Intersection_name
+        for intersection_name, replacement_polygon in MANUAL_REPLACE_INTERSECTION_POLYGONS.items():
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
 
             if not mask.any():
                 continue
@@ -1230,8 +1249,8 @@ def apply_manual_intersection_edits(intersection_gdf):
                 + "+MANUAL_REPLACE"
             )
         # PRINT: print polygons for manual inspection.
-        forIntersection_name in PRINT_INTERSECTIONS_POLYGONS:
-            mask = edited["INTERSECTION_NAME"].astype(str) ==Intersection_name
+        for intersection_name in PRINT_INTERSECTIONS_POLYGONS:
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
 
             if not mask.any():
                 continue
@@ -1239,9 +1258,9 @@ def apply_manual_intersection_edits(intersection_gdf):
             print(edited.loc[mask, ["INTERSECTION_NAME", "geometry"]].to_wkt())
             print(json.dumps(json.loads(edited.loc[mask, "geometry"].to_json()), indent=2))
         # MOVE: shift polygon by x/y metres.
-        forIntersection_name, offsets in MANUAL_MOVE_INTERSECTIONS.items():
+        for intersection_name, offsets in MANUAL_MOVE_INTERSECTIONS.items():
             x_offset_m, y_offset_m = offsets
-            mask = edited["INTERSECTION_NAME"].astype(str) ==Intersection_name
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
 
             if not mask.any():
                 continue
@@ -1298,12 +1317,12 @@ def apply_manual_intersection_edits(intersection_gdf):
         edited["INTERSECTION_X"] = edited.geometry.centroid.x
         edited["INTERSECTION_Y"] = edited.geometry.centroid.y
 
-    # ADD: add missedIntersections manually.
+    # ADD: add missed intersections manually.
     add_records = []
 
-    forIntersection_name, polygon in MANUAL_ADD_INTERSECTION_POLYGONS:
+    for intersection_name, polygon in MANUAL_ADD_INTERSECTION_POLYGONS:
         add_records.append({
-            "INTERSECTION_NAME":Intersection_name,
+            "INTERSECTION_NAME": intersection_name,
             "INTERSECTION_X": polygon.centroid.x,
             "INTERSECTION_Y": polygon.centroid.y,
             "GRAPH_NODE_COUNT": None,
@@ -1331,7 +1350,7 @@ def apply_manual_intersection_edits(intersection_gdf):
     edited["INTERSECTION_X"] = edited.geometry.centroid.x
     edited["INTERSECTION_Y"] = edited.geometry.centroid.y
     # --------------------------------------------------
-    # COPY existingIntersection
+    # COPY existing intersection
     # --------------------------------------------------
     copied_rows = []
 
@@ -1386,7 +1405,7 @@ def apply_manual_intersection_edits(intersection_gdf):
             crs=SOURCE_CRS,
         )
     debug_log(
-        "ManualIntersection edits applied",
+        "Manual intersection edits applied",
         edited[[
             "INTERSECTION_NAME",
             "DETECTION_METHOD",
@@ -1398,24 +1417,24 @@ def apply_manual_intersection_edits(intersection_gdf):
 
     return edited.to_crs(TARGET_CRS)
 
-def point_is_in_intersection_area(point_source,Intersection_gdf):
-    """Return True when a projected point is inside or within tolerance of anIntersection."""
-    if point_source is None or point_source.is_empty orIntersection_gdf.empty:
+def point_is_in_intersection_area(point_source, intersection_gdf):
+    """Return True when a projected point is inside or within tolerance of an intersection."""
+    if point_source is None or point_source.is_empty or intersection_gdf.empty:
         return False
 
-  Intersections_source =Intersection_gdf.to_crs(SOURCE_CRS)
+    intersections_source = intersection_gdf.to_crs(SOURCE_CRS)
 
     return (
-      Intersections_source.geometry.contains(point_source).any()
+        intersections_source.geometry.contains(point_source).any()
         or (
-          Intersections_source.geometry.distance(point_source)
-            <=Intersection_POINT_TOLERANCE_METRES
+            intersections_source.geometry.distance(point_source)
+            <= INTERSECTION_POINT_TOLERANCE_METRES
         ).any()
     )
 
 
 # -----------------------------
-# GPKG ForIntersections
+# GPKG For Intersections
 # -----------------------------
 def detect_intersections_from_gpkg(
     gpkg_path,
@@ -1474,7 +1493,7 @@ def detect_intersections_from_gpkg(
         if nearby_lanes.empty:
             continue
 
-      Intersection_poly = (
+        intersection_poly = (
             nearby_lanes.geometry
             .buffer(8)
             .union_all()
@@ -1482,7 +1501,7 @@ def detect_intersections_from_gpkg(
         )
 
         candidate_polygons.append(intersection_poly)
-        names.append(f"AutoIntersection {idx + 1}")
+        names.append(f"Auto Intersection {idx + 1}")
 
     return gpd.GeoDataFrame(
         {"INTERSECTION_NAME": names},
@@ -1695,7 +1714,7 @@ def load_intersection_boxes():
     names = []
     polygons = []
 
-    for name, polygon inIntersection_POLYGONS:
+    for name, polygon in INTERSECTION_POLYGONS:
         names.append(name)
         polygons.append(polygon)
 
@@ -1706,7 +1725,7 @@ def load_intersection_boxes():
     ).to_crs(TARGET_CRS)
 
 
-def classify_area_categories(gdf, lane_gdf,Intersection_gdf):
+def classify_area_categories(gdf, lane_gdf, intersection_gdf):
     """Classify points using GeoPandas spatial indexes instead of Python loops."""
     if gdf.empty:
         return gdf
@@ -1755,17 +1774,17 @@ def classify_area_categories(gdf, lane_gdf,Intersection_gdf):
     points_source.loc[points_source["ON_LANE"], "AREA_CATEGORY"] = "haul road"
     points_source["INTERSECTION_NAME"] = None
 
-    ifIntersection_gdf is not None and notIntersection_gdf.empty:
-      Intersections_source =Intersection_gdf.to_crs(SOURCE_CRS)[
+    if intersection_gdf is not None and not intersection_gdf.empty:
+        intersections_source = intersection_gdf.to_crs(SOURCE_CRS)[
             ["INTERSECTION_NAME", "geometry"]
         ].copy()
         # Buffer once, then use a spatial-indexed join for contains/near tolerance.
-      Intersections_source["geometry"] =Intersections_source.geometry.buffer(
-          Intersection_POINT_TOLERANCE_METRES
+        intersections_source["geometry"] = intersections_source.geometry.buffer(
+            INTERSECTION_POINT_TOLERANCE_METRES
         )
         hits = gpd.sjoin(
             points_source[["_ROW_ID", "geometry"]],
-          Intersections_source,
+            intersections_source,
             how="left",
             predicate="within",
         )
@@ -1847,7 +1866,7 @@ def process_pair_data(df):
     ).dt.total_seconds().astype("int32")
     gdf_source["TIMESTAMP_STR"] = gdf_source["TIMESTAMP"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    classified = classify_area_categories(gdf_source, dxf_gdf,Intersection_gdf)
+    classified = classify_area_categories(gdf_source, dxf_gdf, intersection_gdf)
     classified["lon"] = classified.geometry.x
     classified["lat"] = classified.geometry.y
     debug_log("process_pair_data", classified)
@@ -1883,16 +1902,16 @@ intersection_gdf = pd.concat(
     ignore_index=True
 )
 intersection_gdf = gpd.GeoDataFrame(
-  Intersection_gdf,
+    intersection_gdf,
     geometry="geometry",
     crs=TARGET_CRS
 )
 
 # Apply manual corrections after automatic detection and manual base polygons.
 # This lets you remove false positives, move polygons, replace polygons,
-# or add missedIntersections from the CONFIG section above.
+# or add missed intersections from the CONFIG section above.
 intersection_gdf = apply_manual_intersection_edits(intersection_gdf)
-export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
+# export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
 
 static_layers = []
 
@@ -1916,7 +1935,7 @@ for geom in dxf_gdf.geometry:
         )
     )
 
-for _, row inIntersection_gdf.iterrows():
+for _, row in intersection_gdf.iterrows():
     if row.geometry is None or row.geometry.is_empty:
         continue
 
@@ -1952,33 +1971,33 @@ for _, row inIntersection_gdf.iterrows():
             )
         )
 
-    centre = polygon.centroid
-  Intersection_name = row.get("INTERSECTION_NAME", "-")
+    # centre = polygon.centroid
+    # intersection_name = row.get("INTERSECTION_NAME", "-")
 
-    static_layers.append(
-        dl.DivMarker(
-            position=[centre.y, centre.x],
-            iconOptions={
-                "html": (
-                    "<div style='"
-                    "background: orange;"
-                    "color: black;"
-                    "font-size: 11px;"
-                    "font-weight: bold;"
-                    "padding: 2px 5px;"
-                    "border: 1px solid black;"
-                    "border-radius: 4px;"
-                    "white-space: nowrap;"
-                    "'>"
-                    f"{intersection_name}"
-                    "</div>"
-                ),
-                "className": "intersection-label",
-                "iconSize": [120, 22],
-                "iconAnchor": [60, 11],
-            },
-        )
-    )
+    # static_layers.append(
+    #     dl.DivMarker(
+    #         position=[centre.y, centre.x],
+    #         iconOptions={
+    #             "html": (
+    #                 "<div style='"
+    #                 "background: orange;"
+    #                 "color: black;"
+    #                 "font-size: 11px;"
+    #                 "font-weight: bold;"
+    #                 "padding: 2px 5px;"
+    #                 "border: 1px solid black;"
+    #                 "border-radius: 4px;"
+    #                 "white-space: nowrap;"
+    #                 "'>"
+    #                 f"{intersection_name}"
+    #                 "</div>"
+    #             ),
+    #             "className": "intersection-label",
+    #             "iconSize": [120, 22],
+    #             "iconAnchor": [60, 11],
+    #         },
+    #     )
+    # )
 
 
 # -----------------------------
@@ -2074,6 +2093,79 @@ app.layout = html.Div(
                     allowCross=False
                 )
             ]
+        ),
+
+        html.Div(
+            style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "18px",
+                "padding": "8px 12px",
+                "alignItems": "center",
+                "fontWeight": "bold",
+                "backgroundColor": "rgba(255, 255, 255, 0.92)",
+                "borderTop": "1px solid #d0d0d0",
+                "borderBottom": "1px solid #d0d0d0",
+            },
+            children=[
+                html.Span("Operational Area:"),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["haul road"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Haul Road",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["intersection"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Intersection",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": AREA_COLORS["dynamic area"],
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Dynamic Area",
+                ]),
+                html.Span([
+                    html.Span(
+                        style={
+                            "display": "inline-block",
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": DEFAULT_AREA_COLOR,
+                            "border": "1px solid black",
+                            "marginRight": "5px",
+                            "verticalAlign": "middle",
+                        }
+                    ),
+                    "Unclassified",
+                ]),
+            ],
         ),
 
         dl.Map(
@@ -2186,16 +2278,6 @@ def update_controls(start_date, end_date):
     Input("end-datetime", "value")
 )
 def update_map(selected_machines, time_range, start_date, end_date):
-    prefix_colors = {
-            "DZ": "blue",
-            "WD": "green",
-            "WC": "pink",
-            "GR": "brown",
-            "LV": "red",
-            "EL": "red",
-            "WL": "purple",
-            "EX": "black"
-        }
     if not selected_machines:
         return []
 
@@ -2322,50 +2404,50 @@ def update_map(selected_machines, time_range, start_date, end_date):
 
     layers = []
 
-    # def build_near_miss_marker(row):
-    #     marker_label = "!" if row["TYPE"] == "HT" else "⚠"
-    #     return dl.DivMarker(
-    #         id=(
-    #             f"NEAR_MISS_{row['TYPE']}_"
-    #             f"{row['MACHINE']}_"
-    #             f"{row['PAIR_MACHINE']}_"
-    #             f"{row['TIME_INT']}_"
-    #             f"{row['lat']:.6f}_"
-    #             f"{row['lon']:.6f}"
-    #         ),
-    #         position=[row["lat"], row["lon"]],
-    #         iconOptions={
-    #             "html": (
-    #                 "<div style='font-size:18px;font-weight:bold;"
-    #                 "color:red;background:white;border:2px solid red;"
-    #                 "border-radius:50%;width:22px;height:22px;"
-    #                 "line-height:20px;text-align:center;'>"
-    #                 f"{marker_label}</div>"
-    #             ),
-    #             "className": "near-miss-machine-marker",
-    #             "iconSize": [22, 22],
-    #             "iconAnchor": [11, 11],
-    #         },
-    #         children=[
-    #             dl.Tooltip([
-    #                 html.Div("Near miss: distance < 15 m"),
-    #                 html.Div(f"Type: {row['TYPE']}"),
-    #                 html.Div(f"Machine: {row['MACHINE']}"),
-    #                 html.Div(f"Near Machine: {row['PAIR_MACHINE']}"),
-    #                 html.Div(f"Time: {row['TIMESTAMP']}"),
-    #                 html.Div(f"Distance: {row['DISTANCE_METRES']:.2f} m"),
-    #                 html.Div(f"Moving: {row['MOVING_STATUS']}"),
-    #                 html.Div(f"Area: {row['AREA_CATEGORY']}"),
-    #                 html.Div(f"X: {row['X']:.2f}"),
-    #                 html.Div(f"Y: {row['Y']:.2f}"),
-    #             ])
-    #         ],
-    #     )
+    def build_near_miss_marker(row):
+        marker_label = "!" if row["TYPE"] == "HT" else "⚠"
+        return dl.DivMarker(
+            id=(
+                f"NEAR_MISS_{row['TYPE']}_"
+                f"{row['MACHINE']}_"
+                f"{row['PAIR_MACHINE']}_"
+                f"{row['TIME_INT']}_"
+                f"{row['lat']:.6f}_"
+                f"{row['lon']:.6f}"
+            ),
+            position=[row["lat"], row["lon"]],
+            iconOptions={
+                "html": (
+                    "<div style='font-size:18px;font-weight:bold;"
+                    "color:red;background:white;border:2px solid red;"
+                    "border-radius:50%;width:22px;height:22px;"
+                    "line-height:20px;text-align:center;'>"
+                    f"{marker_label}</div>"
+                ),
+                "className": "near-miss-machine-marker",
+                "iconSize": [22, 22],
+                "iconAnchor": [11, 11],
+            },
+            children=[
+                dl.Tooltip([
+                    html.Div("Near miss: distance < 15 m"),
+                    html.Div(f"Type: {row['TYPE']}"),
+                    html.Div(f"Machine: {row['MACHINE']}"),
+                    html.Div(f"Near Machine: {row['PAIR_MACHINE']}"),
+                    html.Div(f"Time: {row['TIMESTAMP']}"),
+                    html.Div(f"Distance: {row['DISTANCE_METRES']:.2f} m"),
+                    html.Div(f"Moving: {row['MOVING_STATUS']}"),
+                    html.Div(f"Operational Area: {str(row['AREA_CATEGORY']).title()}"),
+                    html.Div(f"X: {row['X']:.2f}"),
+                    html.Div(f"Y: {row['Y']:.2f}"),
+                ])
+            ],
+        )
 
-    # for near_miss_row in near_miss_points.to_dict("records"):
-    #     layers.append(build_near_miss_marker(near_miss_row))
+    for near_miss_row in near_miss_points.to_dict("records"):
+        layers.append(build_near_miss_marker(near_miss_row))
 
-    # for _,Intersection_row inIntersection_points.iterrows():
+    # for _, intersection_row in intersection_points.iterrows():
     #     layers.append(
     #         dl.CircleMarker(
     #             id=(
@@ -2377,7 +2459,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
     #                 f"{intersection_row['lat']:.6f}_"
     #                 f"{intersection_row['lon']:.6f}"
     #             ),
-    #             center=[intersection_row["lat"],Intersection_row["lon"]],
+    #             center=[intersection_row["lat"], intersection_row["lon"]],
     #             radius=9,
     #             color="orange",
     #             fillColor="orange",
@@ -2386,7 +2468,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
     #             weight=3,
     #             children=[
     #                 dl.Tooltip([
-    #                     html.Div("Point inside calculatedIntersection area"),
+    #                     html.Div("Point inside calculated intersection area"),
     #                     html.Div(f"Intersection: {intersection_row['INTERSECTION_NAME'] or '-'}"),
     #                     html.Div(f"Type: {intersection_row['TYPE']}"),
     #                     html.Div(f"Machine: {intersection_row['MACHINE']}"),
@@ -2412,10 +2494,14 @@ def update_map(selected_machines, time_range, start_date, end_date):
             continue
 
         for _, row in group.iterrows():
-            if row["TYPE"] == "HT":
-                marker_color = "yellow"
-            else:
-                marker_color = prefix_colors.get(row["PREFIX"], "gray")
+            area_category = str(
+                row.get("AREA_CATEGORY", "")
+            ).strip().lower()
+
+            marker_color = AREA_COLORS.get(
+                area_category,
+                DEFAULT_AREA_COLOR,
+            )
 
             layers.append(
                 dl.CircleMarker(
@@ -2445,7 +2531,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
                             html.Div(f"Distance: {row['DISTANCE_METRES']:.2f} m"),
                             html.Div(f"Interaction: {row['INTERACTION_TYPE']}"),
                             html.Div(f"Moving: {row['MOVING_STATUS']}"),
-                            html.Div(f"Area: {row['AREA_CATEGORY']}"),
+                            html.Div(f"Operational Area: {str(row['AREA_CATEGORY']).title()}"),
                             html.Div(f"Intersection: {row['INTERSECTION_NAME'] or '-'}"),
                             html.Div(f"Distance to lane: {row['DISTANCE_TO_LANE_M']:.2f} m"),
                             html.Div(f"X: {row['X']:.2f}"),
@@ -2479,7 +2565,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
                         html.Div(f"Distance: {value['DISTANCE_METRES']:.2f} m"),
                         html.Div(f"Interaction: {value['INTERACTION_TYPE']}"),
                         html.Div(f"Moving: {value['MOVING_STATUS']}"),
-                        html.Div(f"Area: {value['AREA_CATEGORY']}"),
+                        html.Div(f"Operational Area: {str(value['AREA_CATEGORY']).title()}"),
                         html.Div(f"X: {value['X']:.2f}"),
                         html.Div(f"Y: {value['Y']:.2f}")
                     ])
@@ -2511,7 +2597,7 @@ def update_map(selected_machines, time_range, start_date, end_date):
                         html.Div(f"Distance: {value['DISTANCE_METRES']:.2f} m"),
                         html.Div(f"Interaction: {value['INTERACTION_TYPE']}"),
                         html.Div(f"Moving: {value['MOVING_STATUS']}"),
-                        html.Div(f"Area: {value['AREA_CATEGORY']}"),
+                        html.Div(f"Operational Area: {str(value['AREA_CATEGORY']).title()}"),
                         html.Div(f"X: {value['X']:.2f}"),
                         html.Div(f"Y: {value['Y']:.2f}")
                     ])
