@@ -5,6 +5,7 @@ import snowflake.connector
 from sqlalchemy import create_engine
 import ezdxf
 import math
+import numpy as np
 import traceback
 from datetime import datetime
 import networkx as nx
@@ -14,9 +15,9 @@ from shapely.affinity import translate
 from lxml import etree
 import os
 import json
-
-from dash import Dash, dcc, html
-from dash.dependencies import Input, Output
+from functools import lru_cache
+from dash import Dash, dcc, html, no_update
+from dash.dependencies import Input, Output, State
 import dash_leaflet as dl
 
 try:
@@ -39,11 +40,23 @@ TARGET_CRS = "EPSG:4326"
 # DEFAULT_START_DATETIME = "2026-05-09 11:19:01"
 # DEFAULT_END_DATETIME = "2026-05-09 13:19:01"
 
-DEFAULT_START_DATETIME = "2026-07-16 11:00:00"
-DEFAULT_END_DATETIME = "2026-07-16 13:00:00"
+# DEFAULT_START_DATETIME = "2026-07-16 11:00:00"
+# DEFAULT_END_DATETIME = "2026-07-16 13:00:00"
+
+DEFAULT_START_DATETIME = "2026-06-15 11:00:00"
+DEFAULT_END_DATETIME = "2026-06-15 11:30:00"
 
 
-HOV_ASSET_TYPES = ["RD", "RL", "IB", "LV", "EX", "CC", "GR", "LO"]
+HOV_ASSET_TYPES = [
+    "DZ",
+    "RL",
+    "IB",
+    "LV",
+    "EX",
+    "CC",
+    "GR",
+    "LO",
+]
 
 # Intersection detection approach:
 #   1. buffer lane LineStrings to create road-surface polygons,
@@ -68,6 +81,13 @@ INTERSECTION_POLYGON_RADIUS_METRES = 45
 INTERSECTION_POLYGON_BUFFER_METRES = 12
 MIN_BRANCH_COUNT = 3
 MIN_DIRECTION_GROUPS = 3
+
+AREA_COLORS = {
+    "haul road": "#1f77b4",
+    "intersection": "#ff7f0e",
+    "dynamic area": "#2ca02c",
+}
+DEFAULT_AREA_COLOR = "#7f7f7f"
 # MIN_DIRECTION_GROUPS = 2
 
 DEBUG = True
@@ -89,6 +109,77 @@ def debug_log(label, value=None):
             print(value.head(), flush=True)
         else:
             print(value, flush=True)
+
+
+
+def clean_datetime(value, default_value):
+    if value is None or str(value).strip() == "":
+        return default_value
+    return str(value).strip()
+
+
+def empty_geodataframe(crs, columns=None):
+    data = {column: pd.Series(dtype="object") for column in (columns or [])}
+    return gpd.GeoDataFrame(
+        data,
+        geometry=gpd.GeoSeries([], crs=crs),
+        crs=crs,
+    )
+
+
+def ensure_geodataframe(value, crs, name="GeoDataFrame"):
+    if value is None:
+        return empty_geodataframe(crs)
+
+    frame = value.copy() if isinstance(value, gpd.GeoDataFrame) else pd.DataFrame(value).copy()
+
+    if "geometry" not in frame.columns:
+        if len(frame) == 0:
+            return empty_geodataframe(crs, list(frame.columns))
+        raise ValueError(
+            f"{name} does not contain a geometry column. "
+            f"Columns: {list(frame.columns)}"
+        )
+
+    return gpd.GeoDataFrame(
+        frame,
+        geometry="geometry",
+        crs=getattr(value, "crs", None) or crs,
+    )
+
+
+def concat_geodataframes(frames, crs):
+    valid_frames = []
+
+    for frame in frames:
+        if frame is None:
+            continue
+
+        frame = ensure_geodataframe(frame, crs, "GeoDataFrame being concatenated")
+
+        if frame.empty:
+            continue
+
+        if frame.crs != crs:
+            frame = frame.to_crs(crs)
+
+        valid_frames.append(frame)
+
+    if not valid_frames:
+        return empty_intersection_gdf(crs)
+
+    table = pd.concat(
+        [pd.DataFrame(frame.copy()) for frame in valid_frames],
+        ignore_index=True,
+        sort=False,
+    )
+
+    return gpd.GeoDataFrame(
+        table,
+        geometry="geometry",
+        crs=crs,
+    )
+
 
 # Define intersection boxes in SOURCE_CRS metres: (name, min_x, min_y, max_x, max_y).
 # Add/edit boxes after visually checking the X markers against the map.
@@ -434,124 +525,9 @@ PRINT_INTERSECTIONS_POLYGONS = {
 }
 
 # -----------------------------
-# GEOMETRY-SAFE HELPERS
-# -----------------------------
-def ensure_geodataframe(value, crs, name="GeoDataFrame"):
-    """
-    Return a GeoDataFrame with an active geometry column.
-
-    This avoids:
-        ValueError: Unknown column geometry
-    after pandas concat/filter operations.
-    """
-    if value is None:
-        return gpd.GeoDataFrame(
-            geometry=gpd.GeoSeries([], crs=crs),
-            crs=crs,
-        )
-
-    if isinstance(value, gpd.GeoDataFrame):
-        frame = value.copy()
-    else:
-        frame = pd.DataFrame(value).copy()
-
-    if "geometry" not in frame.columns:
-        if len(frame) == 0:
-            return gpd.GeoDataFrame(
-                frame,
-                geometry=gpd.GeoSeries([], crs=crs),
-                crs=crs,
-            )
-
-        raise ValueError(
-            f"{name} has no geometry column. "
-            f"Columns: {list(frame.columns)}"
-        )
-
-    return gpd.GeoDataFrame(
-        frame,
-        geometry="geometry",
-        crs=getattr(value, "crs", None) or crs,
-    )
-
-
-def concat_geodataframes(frames, crs):
-    """
-    Concatenate GeoDataFrames without losing the active geometry column.
-    """
-    valid_frames = []
-
-    for frame in frames:
-        if frame is None:
-            continue
-
-        frame = ensure_geodataframe(
-            frame,
-            crs=crs,
-            name="Concatenated frame",
-        )
-
-        if frame.empty:
-            continue
-
-        if frame.crs != crs:
-            frame = frame.to_crs(crs)
-
-        valid_frames.append(frame)
-
-    if not valid_frames:
-        return empty_intersection_gdf(crs=crs)
-
-    combined_table = pd.concat(
-        [pd.DataFrame(frame.copy()) for frame in valid_frames],
-        ignore_index=True,
-        sort=False,
-    )
-
-    return gpd.GeoDataFrame(
-        combined_table,
-        geometry="geometry",
-        crs=crs,
-    )
-
-
-def validate_manual_polygon(name, polygon):
-    if polygon is None:
-        raise ValueError(f"Manual polygon {name!r} is None.")
-
-    if polygon.is_empty:
-        raise ValueError(f"Manual polygon {name!r} is empty.")
-
-    if polygon.geom_type not in {"Polygon", "MultiPolygon"}:
-        raise ValueError(
-            f"Manual polygon {name!r} must be Polygon or MultiPolygon, "
-            f"not {polygon.geom_type}."
-        )
-
-    if not polygon.is_valid:
-        polygon = polygon.buffer(0)
-
-    if polygon.is_empty:
-        raise ValueError(
-            f"Manual polygon {name!r} could not be repaired."
-        )
-
-    return polygon
-
-# -----------------------------
-# HELPER FUNCTION
-# -----------------------------
-def clean_datetime(value, default_value):
-    if value is None or str(value).strip() == "":
-        return default_value
-
-    return str(value).strip()
-
-
-# -----------------------------
 # DXF LOADER
 # -----------------------------
-def _extract_dxf_entity_coordinates(entity):
+def _extract_dxf_coordinates(entity):
     entity_type = entity.dxftype()
 
     if entity_type == "LINE":
@@ -561,26 +537,23 @@ def _extract_dxf_entity_coordinates(entity):
         ], False
 
     if entity_type == "LWPOLYLINE":
-        points = [
+        return [
             (float(point[0]), float(point[1]))
             for point in entity.get_points("xy")
-        ]
-        return points, bool(entity.closed)
+        ], bool(entity.closed)
 
     if entity_type == "POLYLINE":
-        points = [
+        return [
             (float(vertex.dxf.location.x), float(vertex.dxf.location.y))
             for vertex in entity.vertices
-        ]
-        return points, bool(entity.is_closed)
+        ], bool(entity.is_closed)
 
     return None, False
 
 
 def load_dxf_lanes(dxf_path):
-    """Load lane-like LINE/LWPOLYLINE/POLYLINE geometry safely."""
     if not os.path.exists(dxf_path):
-        raise FileNotFoundError(f"DXF file not found: {dxf_path}")
+        raise FileNotFoundError(f"DXF file was not found: {dxf_path}")
 
     document = ezdxf.readfile(dxf_path)
     modelspace = document.modelspace()
@@ -595,7 +568,7 @@ def load_dxf_lanes(dxf_path):
 
         layer_name = str(entity.dxf.layer)
         available_layers.add(layer_name)
-        points, is_closed = _extract_dxf_entity_coordinates(entity)
+        points, is_closed = _extract_dxf_coordinates(entity)
 
         if not points or len(points) < 2:
             continue
@@ -622,10 +595,9 @@ def load_dxf_lanes(dxf_path):
     records = lane_records if lane_records else fallback_records
 
     if not records:
-        available = ", ".join(sorted(available_layers))
         raise ValueError(
-            "No usable LINE, LWPOLYLINE or POLYLINE geometry was found. "
-            f"Available DXF layers: {available}"
+            "No usable LINE, LWPOLYLINE or POLYLINE geometry was found "
+            f"in the DXF. Available layers: {sorted(available_layers)}"
         )
 
     if not lane_records:
@@ -634,35 +606,28 @@ def load_dxf_lanes(dxf_path):
             "Using all supported line entities."
         )
 
-    dxf_gdf = gpd.GeoDataFrame(
-        records,
-        geometry="geometry",
-        crs=SOURCE_CRS,
-    )
+    dxf_gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=SOURCE_CRS)
     dxf_gdf = dxf_gdf[
-        dxf_gdf.geometry.notna() & ~dxf_gdf.geometry.is_empty
+        dxf_gdf["geometry"].notna() & ~dxf_gdf["geometry"].is_empty
     ].copy()
 
     if dxf_gdf.empty:
-        raise ValueError("DXF entities were found, but no valid geometry remained.")
+        return empty_geodataframe(
+            TARGET_CRS,
+            ["polyline_id", "layer", "vertex_count", "entity_type"],
+        )
 
     dxf_gdf = dxf_gdf.to_crs(TARGET_CRS)
     dxf_gdf["geometry"] = dxf_gdf.geometry.simplify(
-        0.000003,
-        preserve_topology=True,
+        0.000003, preserve_topology=True
     )
 
-    return gpd.GeoDataFrame(
-        dxf_gdf,
-        geometry="geometry",
-        crs=TARGET_CRS,
-    )
+    return gpd.GeoDataFrame(dxf_gdf, geometry="geometry", crs=TARGET_CRS)
 
 # -----------------------------
 # DETECT INTERSECTIONS (HYBRID)
 # -----------------------------
 def detect_intersections_hybrid(lane_gdf):
-    """Use the centreline graph detector without recursive self-calls."""
     return detect_intersections_from_dxf_lanes(lane_gdf)
 
 # -----------------------------
@@ -1098,7 +1063,7 @@ def detect_intersections_from_dxf_lanes(lane_gdf):
     )
 
 
-def export_intersections_csv(intersection_gdf, output_path="ironbridge_detected_intersections.csv"):
+def export_intersections_csv(intersection_gdf, output_path="detected_centerline_intersections.csv"):
     columns = [
         "INTERSECTION_NAME",
         "INTERSECTION_X",
@@ -1129,16 +1094,11 @@ def export_intersections_csv(intersection_gdf, output_path="ironbridge_detected_
 
 def apply_manual_intersection_edits(intersection_gdf):
     """
-    Apply manual polygon edits in this order:
+    Apply manual DELETE / MOVE / REPLACE / ADD rules to detected intersections.
 
-      1. DELETE
-      2. REPLACE
-      3. MOVE
-      4. SWAP
-      5. ADD
-      6. COPY
-
-    All manual polygon coordinates and offsets use SOURCE_CRS metres.
+    This is intentionally applied after the automatic detector, so you can keep
+    improving the detector while still maintaining operationally approved
+    polygon corrections.
     """
     expected_columns = [
         "INTERSECTION_NAME",
@@ -1152,160 +1112,113 @@ def apply_manual_intersection_edits(intersection_gdf):
         "MANUAL_EDIT",
     ]
 
-    edited = ensure_geodataframe(
-        intersection_gdf,
-        crs=TARGET_CRS,
-        name="intersection_gdf",
-    )
-
-    if edited.empty:
-        edited = empty_intersection_gdf(crs=SOURCE_CRS)
+    if intersection_gdf is None or intersection_gdf.empty:
+        edited = gpd.GeoDataFrame(
+            {column: [] for column in expected_columns},
+            geometry=[],
+            crs=TARGET_CRS,
+        )
     else:
+        edited = intersection_gdf.copy()
+        edited = gpd.GeoDataFrame(edited, geometry="geometry", crs=intersection_gdf.crs)
         edited = edited.to_crs(SOURCE_CRS)
 
     for column in expected_columns:
         if column not in edited.columns:
             edited[column] = None
 
-    # --------------------------------------------------
-    # DELETE
-    # --------------------------------------------------
-    if not edited.empty and MANUAL_DELETE_INTERSECTIONS:
+    if not edited.empty:
+        # DELETE: remove false-positive polygons by label.
         edited = edited[
-            ~edited["INTERSECTION_NAME"]
-            .astype(str)
-            .isin(MANUAL_DELETE_INTERSECTIONS)
+            ~edited["INTERSECTION_NAME"].astype(str).isin(MANUAL_DELETE_INTERSECTIONS)
         ].copy()
 
-        edited = ensure_geodataframe(
-            edited,
-            crs=SOURCE_CRS,
-            name="Edited intersections after delete",
-        )
+        # REPLACE: replace polygon geometry entirely.
+        for intersection_name, replacement_polygon in MANUAL_REPLACE_INTERSECTION_POLYGONS.items():
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
 
-    # --------------------------------------------------
-    # REPLACE polygon geometry
-    # --------------------------------------------------
-    for intersection_name, replacement_polygon in (
-        MANUAL_REPLACE_INTERSECTION_POLYGONS.items()
-    ):
-        replacement_polygon = validate_manual_polygon(
-            intersection_name,
-            replacement_polygon,
-        )
-
-        mask = (
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(intersection_name)
-        )
-
-        if not mask.any():
-            debug_log(
-                f"Manual replace target not found: {intersection_name}"
-            )
-            continue
-
-        indices = edited.index[mask]
-
-        for idx in indices:
-            edited.at[idx, "geometry"] = replacement_polygon
-
-        edited.loc[mask, "MANUAL_EDIT"] = "REPLACE"
-        edited.loc[mask, "DETECTION_METHOD"] = (
-            edited.loc[mask, "DETECTION_METHOD"]
-            .fillna("AUTO")
-            .astype(str)
-            + "+MANUAL_REPLACE"
-        )
-
-    # --------------------------------------------------
-    # MOVE polygon geometry
-    # --------------------------------------------------
-    for intersection_name, offsets in MANUAL_MOVE_INTERSECTIONS.items():
-        x_offset_m, y_offset_m = offsets
-
-        mask = (
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(intersection_name)
-        )
-
-        if not mask.any():
-            debug_log(
-                f"Manual move target not found: {intersection_name}"
-            )
-            continue
-
-        for idx in edited.index[mask]:
-            geometry = edited.at[idx, "geometry"]
-
-            if geometry is None or geometry.is_empty:
+            if not mask.any():
                 continue
 
-            edited.at[idx, "geometry"] = translate(
-                geometry,
-                xoff=x_offset_m,
-                yoff=y_offset_m,
+            edited.loc[mask, "geometry"] = replacement_polygon
+            edited.loc[mask, "MANUAL_EDIT"] = "REPLACE"
+            edited.loc[mask, "DETECTION_METHOD"] = (
+                edited.loc[mask, "DETECTION_METHOD"].fillna("AUTO").astype(str)
+                + "+MANUAL_REPLACE"
+            )
+        # PRINT: print polygons for manual inspection.
+        for intersection_name in PRINT_INTERSECTIONS_POLYGONS:
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
+
+            if not mask.any():
+                continue
+
+            print(edited.loc[mask, ["INTERSECTION_NAME", "geometry"]].to_wkt())
+            print(json.dumps(json.loads(edited.loc[mask, "geometry"].to_json()), indent=2))
+        # MOVE: shift polygon by x/y metres.
+        for intersection_name, offsets in MANUAL_MOVE_INTERSECTIONS.items():
+            x_offset_m, y_offset_m = offsets
+            mask = edited["INTERSECTION_NAME"].astype(str) == intersection_name
+
+            if not mask.any():
+                continue
+
+            edited.loc[mask, "geometry"] = edited.loc[mask, "geometry"].apply(
+                lambda geom: translate(
+                    geom,
+                    xoff=x_offset_m,
+                    yoff=y_offset_m,
+                )
+            )
+            edited.loc[mask, "MANUAL_EDIT"] = "MOVE"
+            edited.loc[mask, "DETECTION_METHOD"] = (
+                edited.loc[mask, "DETECTION_METHOD"].fillna("AUTO").astype(str)
+                + "+MANUAL_MOVE"
             )
 
-        edited.loc[mask, "MANUAL_EDIT"] = "MOVE"
-        edited.loc[mask, "DETECTION_METHOD"] = (
-            edited.loc[mask, "DETECTION_METHOD"]
-            .fillna("AUTO")
-            .astype(str)
-            + "+MANUAL_MOVE"
-        )
+        # --------------------------------------------------
+        # SWAP polygon geometries
+        # --------------------------------------------------
+        for name_a, name_b in MANUAL_SWAP_INTERSECTIONS:
 
-    # --------------------------------------------------
-    # SWAP polygon geometry
-    # --------------------------------------------------
-    for name_a, name_b in MANUAL_SWAP_INTERSECTIONS:
-        mask_a = (
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(name_a)
-        )
-        mask_b = (
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(name_b)
-        )
+            mask_a = edited["INTERSECTION_NAME"] == name_a
+            mask_b = edited["INTERSECTION_NAME"] == name_b
 
-        if not mask_a.any() or not mask_b.any():
-            debug_log(
-                f"Manual swap target missing: {name_a}, {name_b}"
+            if not mask_a.any():
+                continue
+
+            if not mask_b.any():
+                continue
+
+            geometry_a = edited.loc[mask_a, "geometry"].iloc[0]
+            geometry_b = edited.loc[mask_b, "geometry"].iloc[0]
+
+            edited.loc[mask_a, "geometry"] = geometry_b
+            edited.loc[mask_b, "geometry"] = geometry_a
+
+            edited.loc[mask_a, "MANUAL_EDIT"] = "SWAP"
+            edited.loc[mask_b, "MANUAL_EDIT"] = "SWAP"
+
+            edited.loc[mask_a, "DETECTION_METHOD"] = (
+                edited.loc[mask_a, "DETECTION_METHOD"]
+                .fillna("AUTO")
+                + "+MANUAL_SWAP"
             )
-            continue
 
-        index_a = edited.index[mask_a][0]
-        index_b = edited.index[mask_b][0]
+            edited.loc[mask_b, "DETECTION_METHOD"] = (
+                edited.loc[mask_b, "DETECTION_METHOD"]
+                .fillna("AUTO")
+                + "+MANUAL_SWAP"
+            )
 
-        geometry_a = edited.at[index_a, "geometry"]
-        geometry_b = edited.at[index_b, "geometry"]
+        
+        edited["INTERSECTION_X"] = edited.geometry.centroid.x
+        edited["INTERSECTION_Y"] = edited.geometry.centroid.y
 
-        edited.at[index_a, "geometry"] = geometry_b
-        edited.at[index_b, "geometry"] = geometry_a
-
-        edited.at[index_a, "MANUAL_EDIT"] = "SWAP"
-        edited.at[index_b, "MANUAL_EDIT"] = "SWAP"
-
-        edited.at[index_a, "DETECTION_METHOD"] = (
-            str(edited.at[index_a, "DETECTION_METHOD"] or "AUTO")
-            + "+MANUAL_SWAP"
-        )
-        edited.at[index_b, "DETECTION_METHOD"] = (
-            str(edited.at[index_b, "DETECTION_METHOD"] or "AUTO")
-            + "+MANUAL_SWAP"
-        )
-
-    # --------------------------------------------------
-    # ADD completely new polygons
-    # --------------------------------------------------
+    # ADD: add missed intersections manually.
     add_records = []
 
     for intersection_name, polygon in MANUAL_ADD_INTERSECTION_POLYGONS:
-        polygon = validate_manual_polygon(
-            intersection_name,
-            polygon,
-        )
-
         add_records.append({
             "INTERSECTION_NAME": intersection_name,
             "INTERSECTION_X": polygon.centroid.x,
@@ -1320,139 +1233,74 @@ def apply_manual_intersection_edits(intersection_gdf):
         })
 
     if add_records:
-        add_gdf = gpd.GeoDataFrame(
-            add_records,
-            geometry="geometry",
-            crs=SOURCE_CRS,
+        add_gdf = gpd.GeoDataFrame(add_records, geometry="geometry", crs=SOURCE_CRS)
+        edited = concat_geodataframes([edited, add_gdf], crs=SOURCE_CRS)
+
+    if edited.empty:
+        return gpd.GeoDataFrame(
+            {column: [] for column in expected_columns},
+            geometry=[],
+            crs=TARGET_CRS,
         )
 
-        edited = concat_geodataframes(
-            [edited, add_gdf],
-            crs=SOURCE_CRS,
-        )
-
+    edited = edited[edited.geometry.notna() & ~edited.geometry.is_empty].copy()
+    edited["INTERSECTION_X"] = edited.geometry.centroid.x
+    edited["INTERSECTION_Y"] = edited.geometry.centroid.y
     # --------------------------------------------------
-    # COPY existing polygons
+    # COPY existing intersection
     # --------------------------------------------------
-    copied_records = []
+    copied_rows = []
 
     for rule in MANUAL_COPY_INTERSECTIONS:
+
         source_name = rule["SOURCE"]
         new_name = rule["NEW_NAME"]
-        x_offset, y_offset = rule.get("OFFSET_XY", (0, 0))
+
+        xoff, yoff = rule.get("OFFSET_XY", (0, 0))
 
         source = edited[
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(source_name)
+            edited["INTERSECTION_NAME"] == source_name
         ]
 
         if source.empty:
-            debug_log(
-                f"Manual copy source not found: {source_name}"
-            )
             continue
 
-        source_row = source.iloc[0]
-        source_geometry = source_row.geometry
+        new_row = source.iloc[0].copy()
 
-        if source_geometry is None or source_geometry.is_empty:
-            continue
+        new_row["INTERSECTION_NAME"] = new_name
 
-        new_geometry = translate(
-            source_geometry,
-            xoff=x_offset,
-            yoff=y_offset,
+        new_row["geometry"] = translate(
+            new_row["geometry"],
+            xoff=xoff,
+            yoff=yoff,
         )
 
-        new_record = source_row.to_dict()
-        new_record["INTERSECTION_NAME"] = new_name
-        new_record["geometry"] = new_geometry
-        new_record["INTERSECTION_X"] = new_geometry.centroid.x
-        new_record["INTERSECTION_Y"] = new_geometry.centroid.y
-        new_record["MANUAL_EDIT"] = "COPY"
-        new_record["DETECTION_METHOD"] = "MANUAL_COPY"
+        new_row["INTERSECTION_X"] = new_row["geometry"].centroid.x
+        new_row["INTERSECTION_Y"] = new_row["geometry"].centroid.y
 
-        copied_records.append(new_record)
+        new_row["MANUAL_EDIT"] = "COPY"
+        new_row["DETECTION_METHOD"] = "MANUAL_COPY"
 
-    if copied_records:
+        copied_rows.append(new_row)
+
+    if copied_rows:
+
         copied_gdf = gpd.GeoDataFrame(
-            copied_records,
+            copied_rows,
             geometry="geometry",
             crs=SOURCE_CRS,
         )
 
-        edited = concat_geodataframes(
-            [edited, copied_gdf],
-            crs=SOURCE_CRS,
-        )
-
-    # --------------------------------------------------
-    # PRINT selected polygons for copying into config
-    # --------------------------------------------------
-    for intersection_name in PRINT_INTERSECTIONS_POLYGONS:
-        selected = edited[
-            edited["INTERSECTION_NAME"].astype(str)
-            == str(intersection_name)
-        ]
-
-        if selected.empty:
-            continue
-
-        for _, row in selected.iterrows():
-            geometry = row.geometry
-
-            print(
-                f"\n{intersection_name} WKT:\n"
-                f"{geometry.wkt}\n"
-            )
-
-            if geometry.geom_type == "Polygon":
-                coordinates = list(geometry.exterior.coords)
-
-                print(
-                    f'{intersection_name} Python polygon:\n'
-                    "Polygon([\n"
-                    + "".join(
-                        f"    ({x:.6f}, {y:.6f}),\n"
-                        for x, y in coordinates
-                    )
-                    + "])\n"
-                )
-
-    if edited.empty:
-        return empty_intersection_gdf(crs=TARGET_CRS)
-
-    edited = ensure_geodataframe(
-        edited,
-        crs=SOURCE_CRS,
-        name="Final manually edited intersections",
-    )
-
-    edited = edited[
-        edited.geometry.notna()
-        & ~edited.geometry.is_empty
-    ].copy()
-
-    edited = ensure_geodataframe(
-        edited,
-        crs=SOURCE_CRS,
-        name="Filtered manually edited intersections",
-    )
-
-    edited["INTERSECTION_X"] = edited.geometry.centroid.x
-    edited["INTERSECTION_Y"] = edited.geometry.centroid.y
-
-    debug_columns = [
-        "INTERSECTION_NAME",
-        "DETECTION_METHOD",
-        "MANUAL_EDIT",
-        "INTERSECTION_X",
-        "INTERSECTION_Y",
-    ]
-
+        edited = concat_geodataframes([edited, copied_gdf], crs=SOURCE_CRS)
     debug_log(
         "Manual intersection edits applied",
-        edited[debug_columns],
+        edited[[
+            "INTERSECTION_NAME",
+            "DETECTION_METHOD",
+            "MANUAL_EDIT",
+            "INTERSECTION_X",
+            "INTERSECTION_Y",
+        ]],
     )
 
     return edited.to_crs(TARGET_CRS)
@@ -1552,84 +1400,72 @@ def detect_intersections_from_gpkg(
 # KML TO GEOJSON
 # -----------------------------
 def parse_coordinates(text):
-    """Parse KML coordinates into GeoJSON [longitude, latitude] order."""
-    coordinates = []
-
-    if not text:
-        return coordinates
+    coords = []
 
     for point in text.strip().split():
-        values = point.split(",")
-        if len(values) < 2:
-            continue
-        coordinates.append([float(values[0]), float(values[1])])
+        lon, lat, *_ = point.split(",")
+        coords.append([float(lat), float(lon)])
 
-    return coordinates
+    return coords
 
 
 def kml_to_geojson(kml_file):
-    """
-    Read standard KML Placemark geometry only.
-    Skyline sx:RasterLayer elements are ignored because WMS is loaded separately.
-    """
-    if not os.path.exists(kml_file):
-        debug_log(f"KML file not found: {kml_file}. Continuing without it.")
-        return {"type": "FeatureCollection", "features": []}
-
-    namespaces = {"kml": "http://www.opengis.net/kml/2.2"}
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
     tree = etree.parse(str(kml_file))
+
     features = []
 
-    for placemark in tree.xpath(".//kml:Placemark", namespaces=namespaces):
-        name = placemark.findtext("kml:name", namespaces=namespaces)
-        properties = {"name": name or "Unnamed feature"}
+    for placemark in tree.xpath(".//kml:Placemark", namespaces=ns):
+        name = placemark.findtext("kml:name", namespaces=ns)
 
         polygon_nodes = placemark.xpath(
-            ".//kml:Polygon/kml:outerBoundaryIs/kml:LinearRing/kml:coordinates",
-            namespaces=namespaces,
+            ".//kml:Polygon//kml:coordinates",
+            namespaces=ns
         )
+
         line_nodes = placemark.xpath(
-            ".//kml:LineString/kml:coordinates",
-            namespaces=namespaces,
+            ".//kml:LineString//kml:coordinates",
+            namespaces=ns
         )
 
-        for node in polygon_nodes:
-            coordinates = parse_coordinates(node.text)
-            if len(coordinates) >= 3:
-                features.append({
-                    "type": "Feature",
-                    "properties": properties.copy(),
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [coordinates],
-                    },
-                })
+        if polygon_nodes:
+            coords = parse_coordinates(polygon_nodes[0].text)
+            coords_lonlat = [[lonlat[1], lonlat[0]] for lonlat in coords]
 
-        for node in line_nodes:
-            coordinates = parse_coordinates(node.text)
-            if len(coordinates) >= 2:
-                features.append({
-                    "type": "Feature",
-                    "properties": properties.copy(),
-                    "geometry": {
-                        "type": "LineString",
-                        "coordinates": coordinates,
-                    },
-                })
+            features.append({
+                "type": "Feature",
+                "properties": {"name": name},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [coords_lonlat],
+                },
+            })
 
-    return {"type": "FeatureCollection", "features": features}
+        if line_nodes:
+            coords = parse_coordinates(line_nodes[0].text)
+            coords_lonlat = [[lonlat[1], lonlat[0]] for lonlat in coords]
+
+            features.append({
+                "type": "Feature",
+                "properties": {"name": name},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coords_lonlat,
+                },
+            })
+
+    return {
+        "type": "FeatureCollection",
+        "features": features
+    }
 
 
 # -----------------------------
 # SNOWFLAKE DATA LOADER
 # -----------------------------
 def load_nearby_machine_data(start_date, end_date):
-    """Load moving DZ-to-HOV interactions from Iron Bridge."""
-    engine = create_engine(
-        "snowflake://{user}:{password}@{account}/{database}/{schema}"
-        "?warehouse={warehouse}"
-        "&role={role}"
-        "&authenticator=externalbrowser".format(
+
+    engine = create_engine('snowflake://{user}:{password}@{account}/{database}/{schema}?warehouse={warehouse}&role={role}&authenticator=externalbrowser'.format(
             account=os.environ["SNOWFLAKE_ACCOUNT"],
             user=os.environ["SNOWFLAKE_USER"],
             password = "",
@@ -1638,27 +1474,44 @@ def load_nearby_machine_data(start_date, end_date):
             warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
             database=os.environ["SNOWFLAKE_DATABASE"],
             schema=os.environ["SNOWFLAKE_SCHEMA"],
-        )
-    )
+        ))
 
-    hov_type_sql = ", ".join(f"'{asset_type}'" for asset_type in HOV_ASSET_TYPES)
+    hov_type_sql = "'DZ', 'RL', 'IB', 'LV', 'EX','CC','GR', 'LO'"
+    # , 'GR', 'LV', 'EL', 'WL', 'EX'
 
     query = f"""
 WITH base AS (
     SELECT
         *,
         DATE_TRUNC('SECOND', "TIMESTAMP") AS TS_SECOND,
-        LAG(X) OVER (PARTITION BY MACHINE ORDER BY "TIMESTAMP") AS PREV_X,
-        LAG(Y) OVER (PARTITION BY MACHINE ORDER BY "TIMESTAMP") AS PREV_Y,
-        LAG(Z) OVER (PARTITION BY MACHINE ORDER BY "TIMESTAMP") AS PREV_Z
+
+        LAG(X) OVER (
+            PARTITION BY MACHINE
+            ORDER BY "TIMESTAMP"
+        ) AS PREV_X,
+
+        LAG(Y) OVER (
+            PARTITION BY MACHINE
+            ORDER BY "TIMESTAMP"
+        ) AS PREV_Y,
+
+        LAG(Z) OVER (
+            PARTITION BY MACHINE
+            ORDER BY "TIMESTAMP"
+        ) AS PREV_Z
+
     FROM AA_OPERATIONS_MANAGEMENT.SELFSERVICE.FMS_MACHINE_LOCATION
     WHERE "TIMESTAMP" BETWEEN '{start_date}' AND '{end_date}'
-      AND HUB = 'Iron Bridge'
+    AND HUB = 'Iron Bridge'
 ),
+
 movement AS (
     SELECT
         *,
-        LEFT(MACHINE, 2) AS ASSET_PREFIX,
+        CASE
+            WHEN MACHINE LIKE 'ELI%' THEN 'ELI'
+            ELSE LEFT(MACHINE, 2)
+        END AS ASSET_PREFIX,
         CASE
             WHEN PREV_X IS NULL THEN 0
             WHEN SQRT(
@@ -1670,58 +1523,75 @@ movement AS (
         END AS IS_MOVING
     FROM base
 ),
+
 ht AS (
-    SELECT * FROM movement WHERE ASSET_PREFIX = 'DZ'
+    SELECT *
+    FROM movement
+    WHERE ASSET_PREFIX ='RD'
 ),
+
 hov AS (
-    SELECT * FROM movement WHERE ASSET_PREFIX IN ({hov_type_sql})
+    SELECT *
+    FROM movement
+    WHERE ASSET_PREFIX IN ({hov_type_sql})
 ),
+
 matches AS (
     SELECT
         h.MACHINE AS HT_MACHINE,
         l.MACHINE AS HOV_MACHINE,
+
         h.ASSET_PREFIX AS HT_PREFIX,
         l.ASSET_PREFIX AS HOV_PREFIX,
+
         TO_CHAR(h.TS_SECOND, 'YYYY-MM-DD HH24:MI:SS') AS "TIMESTAMP",
+
         ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) AS DISTANCE_METRES,
+
         CASE
-            WHEN ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) < 15 THEN 'NEAR_MISS'
-            WHEN ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) <= 50 THEN 'PROCEDURE_BREACH'
+            WHEN ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) < 15
+                THEN 'NEAR_MISS'
+            WHEN ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) <= 50
+                THEN 'PROCEDURE_BREACH'
         END AS INTERACTION_TYPE,
+
         h.X AS HT_X,
         h.Y AS HT_Y,
         h.Z AS HT_Z,
         h.WKT_GEOM AS HT_WKT_GEOM,
         h.THE_GEOM AS HT_GEOM,
+
         l.X AS HOV_X,
         l.Y AS HOV_Y,
         l.Z AS HOV_Z,
         l.WKT_GEOM AS HOV_WKT_GEOM,
         l.THE_GEOM AS HOV_GEOM,
+
         h.IS_MOVING AS HT_IS_MOVING,
         l.IS_MOVING AS HOV_IS_MOVING,
+
         CASE
             WHEN h.IS_MOVING = 1 AND l.IS_MOVING = 1 THEN 'BOTH_MOVING'
-            WHEN h.IS_MOVING = 1 THEN 'DZ_MOVING'
+            WHEN h.IS_MOVING = 1 THEN 'HT_RD_MOVING'
             WHEN l.IS_MOVING = 1 THEN 'HOV_MOVING'
         END AS MOVING_STATUS
+
     FROM ht h
     JOIN hov l
-      ON h.TS_SECOND = l.TS_SECOND
-     AND ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) <= 50
+        ON h.TS_SECOND = l.TS_SECOND
+       AND ST_DISTANCE(h.THE_GEOM, l.THE_GEOM) <= 50
+
     WHERE h.IS_MOVING = 1
+       and l.IS_MOVING = 1
 )
+
 SELECT *
 FROM matches
-ORDER BY "TIMESTAMP", DISTANCE_METRES
-"""
+ORDER BY "TIMESTAMP", DISTANCE_METRES;
+    """
 
-    try:
-        with engine.connect() as connection:
-            df = pd.read_sql(query, connection).rename(columns=str.upper)
-    finally:
-        engine.dispose()
-
+    with engine.connect() as connection:
+        df = pd.read_sql(query, connection).rename(columns=str.upper)
     debug_log("Snowflake rows returned", df)
     return df
 
@@ -1730,227 +1600,206 @@ ORDER BY "TIMESTAMP", DISTANCE_METRES
 # PROCESS HT-HOV MATCH DATA
 # -----------------------------
 def load_intersection_boxes():
-    names = []
-    polygons = []
+    if not INTERSECTION_POLYGONS:
+        return empty_intersection_gdf(TARGET_CRS)
 
+    records = []
     for name, polygon in INTERSECTION_POLYGONS:
-        names.append(name)
-        polygons.append(polygon)
+        if polygon is None or polygon.is_empty:
+            continue
+        records.append({
+            "INTERSECTION_NAME": name,
+            "DETECTION_METHOD": "MANUAL_BASE",
+            "MANUAL_EDIT": "BASE",
+            "geometry": polygon,
+        })
 
-    return gpd.GeoDataFrame(
-        {"INTERSECTION_NAME": names},
-        geometry=polygons,
-        crs=SOURCE_CRS
-    ).to_crs(TARGET_CRS)
+    if not records:
+        return empty_intersection_gdf(TARGET_CRS)
+
+    manual_gdf = gpd.GeoDataFrame(
+        records, geometry="geometry", crs=SOURCE_CRS
+    )
+    manual_gdf["INTERSECTION_X"] = manual_gdf.geometry.centroid.x
+    manual_gdf["INTERSECTION_Y"] = manual_gdf.geometry.centroid.y
+    return manual_gdf.to_crs(TARGET_CRS)
 
 
 def classify_area_categories(gdf, lane_gdf, intersection_gdf):
+    """Classify points using GeoPandas spatial indexes instead of Python loops."""
     if gdf.empty:
         return gdf
 
-    classified = gpd.GeoDataFrame(
-        gdf.copy(),
-        geometry="geometry",
-        crs=gdf.crs,
-    )
-    points_source = classified.to_crs(SOURCE_CRS)
-    lanes_source = gpd.GeoDataFrame(
-        lane_gdf.copy(),
-        geometry="geometry",
-        crs=lane_gdf.crs,
-    ).to_crs(SOURCE_CRS)
+    gdf = ensure_geodataframe(gdf, SOURCE_CRS, "Interaction points")
+    points_source = gdf.to_crs(SOURCE_CRS).copy()
+    points_source["_ROW_ID"] = points_source.index
 
-    def nearest_lane_attributes(point):
-        if point is None or point.is_empty or lanes_source.empty:
-            return {
-                "DISTANCE_TO_LANE_M": None,
-                "polyline_id": None,
-                "lane_layer": None,
-                "lane_vertex_count": None,
-            }
+    lanes_source = lane_gdf.to_crs(SOURCE_CRS)[
+        ["polyline_id", "layer", "vertex_count", "geometry"]
+    ].copy()
+    lanes_source = lanes_source.rename(columns={
+        "layer": "lane_layer",
+        "vertex_count": "lane_vertex_count",
+    })
 
-        distances = lanes_source.geometry.distance(point)
-        nearest_idx = distances.idxmin()
-        nearest_lane = lanes_source.loc[nearest_idx]
-        return {
-            "DISTANCE_TO_LANE_M": float(distances.loc[nearest_idx]),
-            "polyline_id": nearest_lane.get("polyline_id"),
-            "lane_layer": nearest_lane.get("layer"),
-            "lane_vertex_count": nearest_lane.get("vertex_count"),
-        }
+    if lanes_source.empty:
+        points_source["DISTANCE_TO_LANE_M"] = float("nan")
+        points_source["polyline_id"] = None
+        points_source["lane_layer"] = None
+        points_source["lane_vertex_count"] = None
+    else:
+        nearest = gpd.sjoin_nearest(
+            points_source[["_ROW_ID", "geometry"]],
+            lanes_source,
+            how="left",
+            distance_col="DISTANCE_TO_LANE_M",
+        )
+        nearest = (
+            nearest.sort_values(["_ROW_ID", "DISTANCE_TO_LANE_M"])
+            .drop_duplicates("_ROW_ID", keep="first")
+            .set_index("_ROW_ID")
+        )
+        for column in [
+            "DISTANCE_TO_LANE_M",
+            "polyline_id",
+            "lane_layer",
+            "lane_vertex_count",
+        ]:
+            points_source[column] = points_source["_ROW_ID"].map(nearest[column])
 
-    lane_attributes = pd.DataFrame(
-        [nearest_lane_attributes(point) for point in points_source.geometry],
-        index=classified.index,
-    )
-
-    for column_name in lane_attributes.columns:
-        classified[column_name] = lane_attributes[column_name]
-
-    classified = gpd.GeoDataFrame(
-        classified,
-        geometry="geometry",
-        crs=gdf.crs,
-    )
-    classified["ON_LANE"] = (
-        pd.to_numeric(classified["DISTANCE_TO_LANE_M"], errors="coerce")
+    points_source["ON_LANE"] = (
+        points_source["DISTANCE_TO_LANE_M"].fillna(float("inf"))
         <= LANE_BUFFER_METRES
     )
-    classified["AREA_CATEGORY"] = "dynamic area"
-    classified.loc[classified["ON_LANE"], "AREA_CATEGORY"] = "haul road"
-    classified["INTERSECTION_NAME"] = None
+    points_source["AREA_CATEGORY"] = "dynamic area"
+    points_source.loc[points_source["ON_LANE"], "AREA_CATEGORY"] = "haul road"
+    points_source["INTERSECTION_NAME"] = None
 
     if intersection_gdf is not None and not intersection_gdf.empty:
-        intersections_source = gpd.GeoDataFrame(
-            intersection_gdf.copy(),
-            geometry="geometry",
-            crs=intersection_gdf.crs,
-        ).to_crs(SOURCE_CRS)
+        intersections_source = intersection_gdf.to_crs(SOURCE_CRS)[
+            ["INTERSECTION_NAME", "geometry"]
+        ].copy()
+        # Buffer once, then use a spatial-indexed join for contains/near tolerance.
+        intersections_source["geometry"] = intersections_source.geometry.buffer(
+            INTERSECTION_POINT_TOLERANCE_METRES
+        )
+        hits = gpd.sjoin(
+            points_source[["_ROW_ID", "geometry"]],
+            intersections_source,
+            how="left",
+            predicate="within",
+        )
+        hits = hits.dropna(subset=["INTERSECTION_NAME"])
+        if not hits.empty:
+            first_hits = hits.drop_duplicates("_ROW_ID", keep="first").set_index("_ROW_ID")
+            hit_names = points_source["_ROW_ID"].map(first_hits["INTERSECTION_NAME"])
+            hit_mask = hit_names.notna()
+            points_source.loc[hit_mask, "AREA_CATEGORY"] = "intersection"
+            points_source.loc[hit_mask, "INTERSECTION_NAME"] = hit_names[hit_mask]
 
-        for idx, point in points_source.geometry.items():
-            if point is None or point.is_empty:
-                continue
+    classified = points_source.to_crs(TARGET_CRS)
+    classified.index = gdf.index
+    classified = classified.drop(columns=["_ROW_ID"], errors="ignore")
 
-            hits = intersections_source[
-                intersections_source.geometry.contains(point)
-                | (
-                    intersections_source.geometry.distance(point)
-                    <= INTERSECTION_POINT_TOLERANCE_METRES
-                )
-            ]
+    classified = classified[
+        ~(
+            classified["TYPE"].eq("HOV")
+            & classified["PREFIX"].eq("WL")
+            & classified["AREA_CATEGORY"].eq("dynamic area")
+        )
+    ].copy()
 
-            if not hits.empty:
-                classified.at[idx, "AREA_CATEGORY"] = "intersection"
-                classified.at[idx, "INTERSECTION_NAME"] = hits.iloc[0]["INTERSECTION_NAME"]
-
-    debug_log("classify_area_categories", classified)
-    return gpd.GeoDataFrame(
-        classified,
-        geometry="geometry",
-        crs=gdf.crs,
+    classified = gpd.GeoDataFrame(
+        classified, geometry="geometry", crs=TARGET_CRS
     )
+    debug_log("classify_area_categories", classified)
+    return classified
 
 
 def process_pair_data(df):
     if df.empty:
         return gpd.GeoDataFrame(geometry=[], crs=TARGET_CRS)
 
-    df["TIMESTAMP"] = pd.to_datetime(
-        df["TIMESTAMP"],
-        format="%Y-%m-%d %H:%M:%S"
-    )
-    df["HT_GEOMETRY"] = df["HT_WKT_GEOM"].apply(wkt.loads)
-    df["HOV_GEOMETRY"] = df["HOV_WKT_GEOM"].apply(wkt.loads)
+    source = df.copy()
+    source["TIMESTAMP"] = pd.to_datetime(source["TIMESTAMP"], errors="coerce")
+    source = source.dropna(subset=["TIMESTAMP", "HT_WKT_GEOM", "HOV_WKT_GEOM"])
 
-    ht_df = df[[
-        "HT_MACHINE",
-        "HT_PREFIX",
-        "HOV_MACHINE",
-        "HOV_PREFIX",
-        "TIMESTAMP",
-        "DISTANCE_METRES",
-        "INTERACTION_TYPE",
-        "MOVING_STATUS",
-        "HT_IS_MOVING",
-        "HOV_IS_MOVING",
-        "HT_X",
-        "HT_Y",
-        "HT_Z",
-        "HT_GEOMETRY"
-    ]].copy()
+    # Vectorized WKT parsing is substantially faster than Series.apply(wkt.loads).
+    try:
+        from shapely import from_wkt
+        source["HT_GEOMETRY"] = from_wkt(source["HT_WKT_GEOM"].to_numpy())
+        source["HOV_GEOMETRY"] = from_wkt(source["HOV_WKT_GEOM"].to_numpy())
+    except ImportError:
+        source["HT_GEOMETRY"] = source["HT_WKT_GEOM"].map(wkt.loads)
+        source["HOV_GEOMETRY"] = source["HOV_WKT_GEOM"].map(wkt.loads)
 
-    ht_df.columns = [
-        "MACHINE",
-        "PREFIX",
-        "PAIR_MACHINE",
-        "PAIR_PREFIX",
-        "TIMESTAMP",
-        "DISTANCE_METRES",
-        "INTERACTION_TYPE",
-        "MOVING_STATUS",
-        "IS_MOVING",
-        "PAIR_IS_MOVING",
-        "X",
-        "Y",
-        "Z",
-        "geometry"
+    common = [
+        "TIMESTAMP", "DISTANCE_METRES", "INTERACTION_TYPE", "MOVING_STATUS"
     ]
 
+    ht_df = source[[
+        "HT_MACHINE", "HT_PREFIX", "HOV_MACHINE", "HOV_PREFIX", *common,
+        "HT_IS_MOVING", "HOV_IS_MOVING", "HT_X", "HT_Y", "HT_Z", "HT_GEOMETRY"
+    ]].copy()
+    ht_df.columns = [
+        "MACHINE", "PREFIX", "PAIR_MACHINE", "PAIR_PREFIX", *common,
+        "IS_MOVING", "PAIR_IS_MOVING", "X", "Y", "Z", "geometry"
+    ]
     ht_df["TYPE"] = "HT"
 
-    hov_df = df[[
-        "HOV_MACHINE",
-        "HOV_PREFIX",
-        "HT_MACHINE",
-        "HT_PREFIX",
-        "TIMESTAMP",
-        "DISTANCE_METRES",
-        "INTERACTION_TYPE",
-        "MOVING_STATUS",
-        "HOV_IS_MOVING",
-        "HT_IS_MOVING",
-        "HOV_X",
-        "HOV_Y",
-        "HOV_Z",
-        "HOV_GEOMETRY"
+    hov_df = source[[
+        "HOV_MACHINE", "HOV_PREFIX", "HT_MACHINE", "HT_PREFIX", *common,
+        "HOV_IS_MOVING", "HT_IS_MOVING", "HOV_X", "HOV_Y", "HOV_Z", "HOV_GEOMETRY"
     ]].copy()
-
     hov_df.columns = [
-        "MACHINE",
-        "PREFIX",
-        "PAIR_MACHINE",
-        "PAIR_PREFIX",
-        "TIMESTAMP",
-        "DISTANCE_METRES",
-        "INTERACTION_TYPE",
-        "MOVING_STATUS",
-        "IS_MOVING",
-        "PAIR_IS_MOVING",
-        "X",
-        "Y",
-        "Z",
-        "geometry"
+        "MACHINE", "PREFIX", "PAIR_MACHINE", "PAIR_PREFIX", *common,
+        "IS_MOVING", "PAIR_IS_MOVING", "X", "Y", "Z", "geometry"
     ]
-
     hov_df["TYPE"] = "HOV"
 
-    plot_df = pd.concat([ht_df, hov_df], ignore_index=True)
-    plot_df = plot_df.drop_duplicates(
-        subset=["TYPE", "PREFIX", "PAIR_PREFIX", "MACHINE", "PAIR_MACHINE", "TIMESTAMP", "X", "Y"]
+    plot_df = pd.concat([ht_df, hov_df], ignore_index=True).drop_duplicates(
+        subset=["TYPE", "MACHINE", "PAIR_MACHINE", "TIMESTAMP", "X", "Y"]
     )
 
     if "geometry" not in plot_df.columns:
         raise ValueError(
-            "Processed interaction records have no geometry column."
+            "Processed interaction data has no geometry column. "
+            f"Columns: {list(plot_df.columns)}"
         )
 
-    plot_df = plot_df[
-        plot_df["geometry"].notna()
-    ].copy()
+    plot_df = plot_df[plot_df["geometry"].notna()].copy()
 
     if plot_df.empty:
-        return gpd.GeoDataFrame(
-            geometry=gpd.GeoSeries([], crs=TARGET_CRS),
-            crs=TARGET_CRS,
-        )
+        return empty_geodataframe(TARGET_CRS)
 
-    gdf = gpd.GeoDataFrame(
-        plot_df,
-        geometry="geometry",
-        crs=SOURCE_CRS
-    ).to_crs(TARGET_CRS)
+    gdf_source = gpd.GeoDataFrame(
+        plot_df, geometry="geometry", crs=SOURCE_CRS
+    )
+    gdf_source.sort_values(["TYPE", "MACHINE", "PAIR_MACHINE", "TIMESTAMP"], inplace=True)
 
-    gdf.sort_values(["TYPE", "PAIR_PREFIX", "TIMESTAMP"], inplace=True)
+    min_timestamp = gdf_source["TIMESTAMP"].min()
+    gdf_source["TIME_INT"] = (
+        gdf_source["TIMESTAMP"] - min_timestamp
+    ).dt.total_seconds().astype("int32")
+    gdf_source["TIMESTAMP_STR"] = gdf_source["TIMESTAMP"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    gdf["lon"] = gdf.geometry.x
-    gdf["lat"] = gdf.geometry.y
-    gdf["TIMESTAMP_STR"] = gdf["TIMESTAMP"].astype(str).str.split("+").str[0]
+    classified = classify_area_categories(gdf_source, dxf_gdf, intersection_gdf)
+    classified["lon"] = classified.geometry.x
+    classified["lat"] = classified.geometry.y
+    debug_log("process_pair_data", classified)
+    return classified
 
-    gdf["TIME_INT"] = (
-        gdf["TIMESTAMP"] - gdf["TIMESTAMP"].min()
-    ).dt.total_seconds().astype(int)
-    debug_log("process_pair_data", gdf)
-    return classify_area_categories(gdf, dxf_gdf, intersection_gdf)
+
+@lru_cache(maxsize=8)
+def get_processed_pair_data(start_date, end_date):
+    """Cache Snowflake and geospatial processing by exact date range."""
+    raw = load_nearby_machine_data(start_date, end_date)
+    return process_pair_data(raw)
+
+
+def get_processed_pair_data_copy(start_date, end_date):
+    # Callbacks filter the result, so return a shallow copy to protect the cache.
+    return get_processed_pair_data(start_date, end_date).copy()
 
 
 # -----------------------------
@@ -1959,17 +1808,14 @@ def process_pair_data(df):
 geojson_data = kml_to_geojson(KML_FILE)
 dxf_gdf = load_dxf_lanes(DXF_PATH)
 manual_intersections_gdf = load_intersection_boxes()
-dxf_intersections_gdf = detect_intersections_hybrid(dxf_gdf)
+dxf_intersections_gdf = detect_intersections_from_dxf_lanes(dxf_gdf)
 # export_intersections_csv(dxf_intersections_gdf)
 
 # Keep the manually confirmed polygons and add the automatically detected
 # ST_DWITHIN-style lane-pair clusters. Do not include the old GPKG endpoint
 # detector here because it can over-detect ordinary haul-road joins.
 intersection_gdf = concat_geodataframes(
-    [
-        manual_intersections_gdf,
-        dxf_intersections_gdf,
-    ],
+    [manual_intersections_gdf, dxf_intersections_gdf],
     crs=TARGET_CRS,
 )
 
@@ -1977,7 +1823,7 @@ intersection_gdf = concat_geodataframes(
 # This lets you remove false positives, move polygons, replace polygons,
 # or add missed intersections from the CONFIG section above.
 intersection_gdf = apply_manual_intersection_edits(intersection_gdf)
-export_intersections_csv(intersection_gdf, "ironbridge_intersections.csv")
+# export_intersections_csv(intersection_gdf, "final_intersections_after_manual_edits.csv")
 
 static_layers = []
 
@@ -2037,112 +1883,125 @@ for _, row in intersection_gdf.iterrows():
             )
         )
 
-    centre = row.geometry.centroid
-    intersection_name = row.get("INTERSECTION_NAME", "-")
+    # centre = polygon.centroid
+    # intersection_name = row.get("INTERSECTION_NAME", "-")
 
-    static_layers.append(
-        dl.DivMarker(
-            position=[centre.y, centre.x],
-            iconOptions={
-                "html": (
-                    "<div style='"
-                    "background: orange;"
-                    "color: black;"
-                    "font-size: 11px;"
-                    "font-weight: bold;"
-                    "padding: 2px 5px;"
-                    "border: 1px solid black;"
-                    "border-radius: 4px;"
-                    "white-space: nowrap;"
-                    "'>"
-                    f"{intersection_name}"
-                    "</div>"
-                ),
-                "className": "intersection-label",
-                "iconSize": [120, 22],
-                "iconAnchor": [60, 11],
-            },
-        )
-    )
+    # static_layers.append(
+    #     dl.DivMarker(
+    #         position=[centre.y, centre.x],
+    #         iconOptions={
+    #             "html": (
+    #                 "<div style='"
+    #                 "background: orange;"
+    #                 "color: black;"
+    #                 "font-size: 11px;"
+    #                 "font-weight: bold;"
+    #                 "padding: 2px 5px;"
+    #                 "border: 1px solid black;"
+    #                 "border-radius: 4px;"
+    #                 "white-space: nowrap;"
+    #                 "'>"
+    #                 f"{intersection_name}"
+    #                 "</div>"
+    #             ),
+    #             "className": "intersection-label",
+    #             "iconSize": [120, 22],
+    #             "iconAnchor": [60, 11],
+    #         },
+    #     )
+    # )
 
 
 # -----------------------------
-# DASH APP
+# DASH APP - PERFORMANCE-OPTIMISED LOADING
 # -----------------------------
+# The date inputs no longer trigger Snowflake on every keystroke.
+# Data is loaded once when the user clicks "Load Data" and remains in the
+# server-side LRU cache. The browser stores only the date-range cache key.
+MAX_DASH_POINT_MARKERS = 5000
+
 app = Dash(__name__)
 
 app.layout = html.Div(
     style={"height": "100vh"},
     children=[
-
         html.Div(
-            "Iron Bridge - DZ/HOV Interactions Within 50 m",
+            "Eliwana Haul Road - HT/RD/HOV Interactions Within 50 m",
             style={
                 "padding": "10px",
                 "fontSize": "20px",
-                "fontWeight": "bold"
-            }
+                "fontWeight": "bold",
+            },
         ),
+
+        # Stores only the active server-cache key, not the GeoDataFrame.
+        dcc.Store(id="loaded-data-key", storage_type="memory"),
 
         html.Div(
-            style={"padding": "10px"},
+            style={
+                "padding": "10px",
+                "display": "flex",
+                "gap": "12px",
+                "alignItems": "end",
+                "flexWrap": "wrap",
+            },
             children=[
-
-                html.Label("Start Datetime"),
-
-                dcc.Input(
-                    id="start-datetime",
-                    type="text",
-                    value=DEFAULT_START_DATETIME,
-                    placeholder="YYYY-MM-DD HH:MM:SS",
+                html.Div([
+                    html.Label("Start Datetime"),
+                    dcc.Input(
+                        id="start-datetime",
+                        type="text",
+                        value=DEFAULT_START_DATETIME,
+                        placeholder="YYYY-MM-DD HH:MM:SS",
+                        debounce=True,
+                        style={"width": "180px"},
+                    ),
+                ]),
+                html.Div([
+                    html.Label("End Datetime"),
+                    dcc.Input(
+                        id="end-datetime",
+                        type="text",
+                        value=DEFAULT_END_DATETIME,
+                        placeholder="YYYY-MM-DD HH:MM:SS",
+                        debounce=True,
+                        style={"width": "180px"},
+                    ),
+                ]),
+                html.Button(
+                    "Load Data",
+                    id="load-data-button",
+                    n_clicks=0,
                     style={
-                        "marginRight": "20px",
-                        "width": "180px"
-                    }
+                        "height": "36px",
+                        "padding": "0 18px",
+                        "fontWeight": "bold",
+                        "cursor": "pointer",
+                    },
                 ),
-
-                html.Label("End Datetime"),
-
-                dcc.Input(
-                    id="end-datetime",
-                    type="text",
-                    value=DEFAULT_END_DATETIME,
-                    placeholder="YYYY-MM-DD HH:MM:SS",
-                    style={"width": "180px"}
-                )
-            ]
+                dcc.Loading(
+                    type="circle",
+                    children=html.Div(
+                        id="load-status",
+                        children="Select a date range and click Load Data.",
+                        style={"minWidth": "260px"},
+                    ),
+                ),
+            ],
         ),
-
-        # html.Div(
-        #     style={"padding": "10px"},
-        #     children=[
-        #         html.Label("Distance Threshold"),
-
-        #         dcc.Dropdown(
-        #             id="distance-dropdown",
-        #             options=[
-        #                 {"label": "10 m", "value": 10},
-        #                 {"label": "20 m", "value": 20},
-        #                 {"label": "50 m", "value": 50},
-        #             ],
-        #             value=50,
-        #             clearable=False
-        #         )
-        #     ]
-        # ),
 
         html.Div(
             style={"padding": "10px"},
             children=[
                 html.Label("Select Asset types"),
-
                 dcc.Dropdown(
                     id="machine-dropdown",
                     options=[],
                     value=[],
-                    multi=True
-                )
-            ]
+                    multi=True,
+                    disabled=True,
+                ),
+            ],
         ),
 
         html.Div(
@@ -2156,545 +2015,315 @@ app.layout = html.Div(
                     value=[0, 1],
                     marks={0: "Start", 1: "End"},
                     step=60,
-                    allowCross=False
-                )
-            ]
+                    allowCross=False,
+                    disabled=True,
+                    updatemode="mouseup",
+                ),
+            ],
         ),
 
-        dl.Map(
-            id="trajectory-map",
-            center=[-22.35, 116.95],
-            zoom=18,
-            crs="EPSG4326",
-            children=[
-
-                dl.WMSTileLayer(
-                    url=WMS_URL,
-                    layers="BaseGlobe.I.tbp",
-                    format="image/jpeg",
-                    transparent=False,
-                    version="1.3.0",
-                    attribution="SkylineGlobe Server",
-                ),
-
-                dl.GeoJSON(
-                    data=geojson_data,
-                    zoomToBounds=False,
-                    options={
-                        "style": {
-                            "color": "white",
-                            "weight": 0,
-                            "fillOpacity": 0,
-                        }
-                    },
-                ),
-
-                dl.LayerGroup(children=static_layers),
-
-                dl.LayerGroup(id="dynamic-layers"),
-            ],
+        html.Div(
             style={
-                "height": "80vh",
-                "width": "100%",
-                "margin": "0",
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "18px",
+                "padding": "8px 12px",
+                "alignItems": "center",
+                "fontWeight": "bold",
+                "backgroundColor": "rgba(255, 255, 255, 0.92)",
+                "borderTop": "1px solid #d0d0d0",
+                "borderBottom": "1px solid #d0d0d0",
             },
-        )
-    ]
+            children=[
+                html.Span("Operational Area:"),
+                html.Span([
+                    html.Span(style={
+                        "display": "inline-block", "width": "12px", "height": "12px",
+                        "backgroundColor": AREA_COLORS["haul road"],
+                        "border": "1px solid black", "marginRight": "5px",
+                        "verticalAlign": "middle",
+                    }),
+                    "Haul Road",
+                ]),
+                html.Span([
+                    html.Span(style={
+                        "display": "inline-block", "width": "12px", "height": "12px",
+                        "backgroundColor": AREA_COLORS["intersection"],
+                        "border": "1px solid black", "marginRight": "5px",
+                        "verticalAlign": "middle",
+                    }),
+                    "Intersection",
+                ]),
+                html.Span([
+                    html.Span(style={
+                        "display": "inline-block", "width": "12px", "height": "12px",
+                        "backgroundColor": AREA_COLORS["dynamic area"],
+                        "border": "1px solid black", "marginRight": "5px",
+                        "verticalAlign": "middle",
+                    }),
+                    "Dynamic Area",
+                ]),
+                html.Span([
+                    html.Span(style={
+                        "display": "inline-block", "width": "12px", "height": "12px",
+                        "backgroundColor": DEFAULT_AREA_COLOR,
+                        "border": "1px solid black", "marginRight": "5px",
+                        "verticalAlign": "middle",
+                    }),
+                    "Unclassified",
+                ]),
+            ],
+        ),
+
+        dcc.Loading(
+            type="circle",
+            children=dl.Map(
+                id="trajectory-map",
+                center=[-22.0, 119.0],
+                zoom=18,
+                crs="EPSG4326",
+                children=[
+                    dl.WMSTileLayer(
+                        url=WMS_URL,
+                        layers="BaseGlobe.I.tbp",
+                        format="image/jpeg",
+                        transparent=False,
+                        version="1.3.0",
+                        attribution="SkylineGlobe Server",
+                    ),
+                    dl.GeoJSON(
+                        data=geojson_data,
+                        zoomToBounds=True,
+                        options={
+                            "style": {
+                                "color": "white",
+                                "weight": 0,
+                                "fillOpacity": 0,
+                            }
+                        },
+                    ),
+                    dl.LayerGroup(children=static_layers),
+                    dl.LayerGroup(id="dynamic-layers"),
+                ],
+                style={
+                    "height": "80vh",
+                    "width": "100%",
+                    "margin": "0",
+                },
+            ),
+        ),
+    ],
 )
 
 
-# ============================================================
-# UPDATE CONTROLS
-# ============================================================
-# @app.callback(
-#     Output("machine-dropdown", "options"),
-#     Output("machine-dropdown", "value"),
-#     Output("time-slider", "min"),
-#     Output("time-slider", "max"),
-#     Output("time-slider", "value"),
-#     Output("time-slider", "marks"),
+# -----------------------------
+# LOAD DATA ONCE
+# -----------------------------
+@app.callback(
+    Output("loaded-data-key", "data"),
+    Output("machine-dropdown", "options"),
+    Output("machine-dropdown", "value"),
+    Output("machine-dropdown", "disabled"),
+    Output("time-slider", "min"),
+    Output("time-slider", "max"),
+    Output("time-slider", "value"),
+    Output("time-slider", "marks"),
+    Output("time-slider", "disabled"),
+    Output("load-status", "children"),
+    Input("load-data-button", "n_clicks"),
+    State("start-datetime", "value"),
+    State("end-datetime", "value"),
+    prevent_initial_call=True,
+)
+def load_dashboard_data(n_clicks, start_date, end_date):
+    if not n_clicks:
+        return (no_update,) * 10
 
-#     Input("start-datetime", "value"),
-#     Input("end-datetime", "value"),
-# )
-# def update_controls(start_date, end_date):
-#     start_date = clean_datetime(
-#         start_date,
-#         DEFAULT_START_DATETIME,
-#     )
+    start_date = clean_datetime(start_date, DEFAULT_START_DATETIME)
+    end_date = clean_datetime(end_date, DEFAULT_END_DATETIME)
 
-#     end_date = clean_datetime(
-#         end_date,
-#         DEFAULT_END_DATETIME,
-#     )
+    try:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+    except Exception:
+        return (
+            None, [], [], True, 0, 1, [0, 1], {0: "Invalid date"}, True,
+            "Invalid datetime format. Use YYYY-MM-DD HH:MM:SS.",
+        )
 
-#     interaction_df = load_nearby_machine_data(
-#         start_date,
-#         end_date,
-#     )
+    if end_ts <= start_ts:
+        return (
+            None, [], [], True, 0, 1, [0, 1], {0: "Invalid range"}, True,
+            "End datetime must be later than start datetime.",
+        )
 
-#     gdf_plot = process_pair_data(interaction_df)
+    # Normalise the key so equivalent input strings share the same cache entry.
+    cache_start = start_ts.strftime("%Y-%m-%d %H:%M:%S")
+    cache_end = end_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-#     if gdf_plot.empty:
-#         return [], [], 0, 1, [0, 1], {
-#             0: "No data",
-#             1: "",
-#         }
+    try:
+        gdf_plot = get_processed_pair_data(cache_start, cache_end)
+    except Exception as exc:
+        debug_log("Dash data load failed", traceback.format_exc())
+        return (
+            None, [], [], True, 0, 1, [0, 1], {0: "Load failed"}, True,
+            f"Data load failed: {exc}",
+        )
 
-#     hov_prefixes = sorted(
-#         gdf_plot.loc[
-#             gdf_plot["TYPE"] == "HOV",
-#             "PREFIX",
-#         ].dropna().unique()
-#     )
+    if gdf_plot.empty:
+        return (
+            {"start": cache_start, "end": cache_end},
+            [], [], True, 0, 1, [0, 1], {0: "No data"}, True,
+            "No interactions were returned for this date range.",
+        )
 
-#     options = [
-#         {
-#             "label": prefix,
-#             "value": prefix,
-#         }
-#         for prefix in hov_prefixes
-#     ]
+    machines = sorted(
+        gdf_plot.loc[gdf_plot["TYPE"] == "HOV", "PREFIX"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    machine_options = [{"label": m, "value": m} for m in machines]
 
-#     minimum_time = int(
-#         gdf_plot["TIME_INT"].min()
-#     )
+    min_time = int(gdf_plot["TIME_INT"].min())
+    max_time = int(gdf_plot["TIME_INT"].max())
+    minimum_timestamp = gdf_plot["TIMESTAMP"].min()
 
-#     maximum_time = int(
-#         gdf_plot["TIME_INT"].max()
-#     )
+    mark_values = (
+        pd.Series(
+            np.linspace(
+                min_time,
+                max_time,
+                num=min(9, max(max_time - min_time + 1, 2)),
+            )
+        )
+        .round()
+        .astype(int)
+        .drop_duplicates()
+        .tolist()
+    )
 
-#     mark_count = 8
-#     mark_step = max(
-#         (maximum_time - minimum_time) // mark_count,
-#         1,
-#     )
+    time_marks = {
+        int(value): (minimum_timestamp + pd.Timedelta(seconds=int(value))).strftime("%H:%M")
+        for value in mark_values
+    }
+    time_marks[max_time] = (
+        minimum_timestamp + pd.Timedelta(seconds=max_time)
+    ).strftime("%H:%M")
 
-#     minimum_timestamp = (
-#         gdf_plot["TIMESTAMP"].min()
-#     )
-
-#     marks = {}
-
-#     for time_value in range(
-#         minimum_time,
-#         maximum_time + 1,
-#         mark_step,
-#     ):
-#         label_time = (
-#             minimum_timestamp
-#             + pd.Timedelta(seconds=time_value)
-#         )
-
-#         marks[time_value] = (
-#             label_time.strftime("%H:%M")
-#         )
-
-#     marks[maximum_time] = (
-#         minimum_timestamp
-#         + pd.Timedelta(seconds=maximum_time)
-#     ).strftime("%H:%M")
-
-#     return (
-#         options,
-#         hov_prefixes,
-#         minimum_time,
-#         maximum_time,
-#         [minimum_time, maximum_time],
-#         marks,
-#     )
+    return (
+        {"start": cache_start, "end": cache_end},
+        machine_options,
+        machines,
+        False,
+        min_time,
+        max_time,
+        [min_time, max_time],
+        time_marks,
+        False,
+        f"Loaded {len(gdf_plot):,} map records for {cache_start} to {cache_end}.",
+    )
 
 
-# # ============================================================
-# # UPDATE MAP
-# # ============================================================
-# @app.callback(
-#     Output("dynamic-layers", "children"),
+# -----------------------------
+# UPDATE MAP FROM SERVER CACHE ONLY
+# -----------------------------
+@app.callback(
+    Output("dynamic-layers", "children"),
+    Input("machine-dropdown", "value"),
+    Input("time-slider", "value"),
+    Input("loaded-data-key", "data"),
+    prevent_initial_call=True,
+)
+def update_map(selected_machines, time_range, loaded_data_key):
+    if not loaded_data_key or not selected_machines or not time_range:
+        return []
 
-#     Input("machine-dropdown", "value"),
-#     Input("time-slider", "value"),
-#     Input("start-datetime", "value"),
-#     Input("end-datetime", "value"),
-# )
-# def update_map(
-#     selected_hov_prefixes,
-#     time_range,
-#     start_date,
-#     end_date,
-# ):
-#     if not selected_hov_prefixes:
-#         return []
+    start_date = loaded_data_key.get("start")
+    end_date = loaded_data_key.get("end")
+    if not start_date or not end_date:
+        return []
 
-#     start_date = clean_datetime(
-#         start_date,
-#         DEFAULT_START_DATETIME,
-#     )
+    # This is an in-memory cache lookup after the Load Data callback.
+    gdf_plot = get_processed_pair_data(start_date, end_date)
+    if gdf_plot.empty:
+        return []
 
-#     end_date = clean_datetime(
-#         end_date,
-#         DEFAULT_END_DATETIME,
-#     )
+    start_time, end_time = map(int, time_range)
+    selected_set = set(selected_machines)
 
-#     start_time, end_time = time_range
+    mask = (
+        (
+            (gdf_plot["TYPE"].eq("HT") & gdf_plot["PAIR_PREFIX"].isin(selected_set))
+            | (gdf_plot["TYPE"].eq("HOV") & gdf_plot["PREFIX"].isin(selected_set))
+        )
+        & gdf_plot["TIME_INT"].between(start_time, end_time, inclusive="both")
+    )
 
-#     interaction_df = load_nearby_machine_data(
-#         start_date,
-#         end_date,
-#     )
+    filtered = gdf_plot.loc[mask].dropna(subset=["lon", "lat"]).copy()
+    if filtered.empty:
+        return []
 
-#     gdf_plot = process_pair_data(interaction_df)
+    # Leaflet becomes slow when thousands of individual Dash components are sent.
+    # Keep the temporal and asset coverage while limiting browser component count.
+    if len(filtered) > MAX_DASH_POINT_MARKERS:
+        filtered = (
+            filtered.sort_values("TIME_INT")
+            .iloc[::math.ceil(len(filtered) / MAX_DASH_POINT_MARKERS)]
+            .copy()
+        )
 
-#     if gdf_plot.empty:
-#         return []
+    layers = []
+    for row in filtered.itertuples(index=False):
+        area_category = str(getattr(row, "AREA_CATEGORY", "")).strip().lower()
+        marker_color = AREA_COLORS.get(area_category, DEFAULT_AREA_COLOR)
+        intersection_name = getattr(row, "INTERSECTION_NAME", None) or "-"
+        distance_to_lane = getattr(row, "DISTANCE_TO_LANE_M", float("nan"))
 
-#     gdf_plot = gdf_plot[
-#         (
-#             (
-#                 (gdf_plot["TYPE"] == "HT")
-#                 & (
-#                     gdf_plot["PAIR_PREFIX"].isin(
-#                         selected_hov_prefixes
-#                     )
-#                 )
-#             )
-#             |
-#             (
-#                 (gdf_plot["TYPE"] == "HOV")
-#                 & (
-#                     gdf_plot["PREFIX"].isin(
-#                         selected_hov_prefixes
-#                     )
-#                 )
-#             )
-#         )
-#         & (
-#             gdf_plot["TIME_INT"]
-#             >= int(start_time)
-#         )
-#         & (
-#             gdf_plot["TIME_INT"]
-#             <= int(end_time)
-#         )
-#     ].copy()
+        layers.append(
+            dl.CircleMarker(
+                center=[row.lat, row.lon],
+                radius=4,
+                color=marker_color,
+                fillColor=marker_color,
+                fill=True,
+                fillOpacity=0.85,
+                weight=2,
+                children=[
+                    dl.Tooltip([
+                        html.Div(f"Type: {row.TYPE}"),
+                        html.Div(f"Machine: {row.MACHINE}"),
+                        html.Div(f"Asset Type: {row.PREFIX}"),
+                        html.Div(f"Near Machine: {row.PAIR_MACHINE}"),
+                        html.Div(f"Near Asset Type: {row.PAIR_PREFIX}"),
+                        html.Div(f"Time: {row.TIMESTAMP_STR}"),
+                        html.Div(f"Distance: {row.DISTANCE_METRES:.2f} m"),
+                        html.Div(f"Interaction: {row.INTERACTION_TYPE}"),
+                        html.Div(f"Moving: {row.MOVING_STATUS}"),
+                        html.Div(f"Operational Area: {area_category.title()}"),
+                        html.Div(f"Intersection: {intersection_name}"),
+                        html.Div(
+                            "Distance to lane: -"
+                            if pd.isna(distance_to_lane)
+                            else f"Distance to lane: {distance_to_lane:.2f} m"
+                        ),
+                        html.Div(f"X: {row.X:.2f}"),
+                        html.Div(f"Y: {row.Y:.2f}"),
+                    ])
+                ],
+            )
+        )
 
-#     if gdf_plot.empty:
-#         return []
-
-#     prefix_colors = {
-#         "RD": "blue",
-#         "RL": "green",
-#         "IB": "orange",
-#         "LV": "red",
-#         "EX": "black",
-#         "CC": "purple",
-#         "GR": "brown",
-#         "LO": "pink",
-#     }
-
-#     layers = []
-
-#     # --------------------------------------------------------
-#     # First DZ point in each continuous interaction sequence
-#     # --------------------------------------------------------
-#     dz_points = (
-#         gdf_plot[
-#             gdf_plot["TYPE"] == "HT"
-#         ]
-#         .dropna(subset=["lon", "lat"])
-#         .sort_values(
-#             [
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#                 "TIME_INT",
-#             ]
-#         )
-#         .copy()
-#     )
-
-#     dz_points["PREV_TIME_INT"] = (
-#         dz_points.groupby(
-#             [
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#             ]
-#         )["TIME_INT"].shift()
-#     )
-
-#     dz_points["NEW_INTERACTION"] = (
-#         dz_points["PREV_TIME_INT"].isna()
-#         |
-#         (
-#             (
-#                 dz_points["TIME_INT"]
-#                 - dz_points["PREV_TIME_INT"]
-#             )
-#             > MAX_INTERACTION_GAP_SECONDS
-#         )
-#     )
-
-#     dz_points["INTERACTION_ID"] = (
-#         dz_points.groupby(
-#             [
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#             ]
-#         )["NEW_INTERACTION"].cumsum()
-#     )
-
-#     first_dz_points = (
-#         dz_points.sort_values(
-#             [
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#                 "INTERACTION_ID",
-#                 "TIME_INT",
-#             ]
-#         )
-#         .drop_duplicates(
-#             subset=[
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#                 "INTERACTION_ID",
-#             ],
-#             keep="first",
-#         )
-#     )
-
-#     # --------------------------------------------------------
-#     # Near-miss markers: closest point per machine pair
-#     # --------------------------------------------------------
-#     near_miss_points = (
-#         gdf_plot[
-#             (
-#                 gdf_plot["TYPE"] == "HT"
-#             )
-#             & (
-#                 gdf_plot["INTERACTION_TYPE"]
-#                 == "NEAR_MISS"
-#             )
-#             & (
-#                 gdf_plot["DISTANCE_METRES"] < 15
-#             )
-#         ]
-#         .dropna(subset=["lon", "lat"])
-#         .sort_values("DISTANCE_METRES")
-#         .drop_duplicates(
-#             subset=[
-#                 "MACHINE",
-#                 "PAIR_MACHINE",
-#             ],
-#             keep="first",
-#         )
-#     )
-
-#     for row in near_miss_points.itertuples():
-#         layers.append(
-#             dl.DivMarker(
-#                 position=[row.lat, row.lon],
-#                 iconOptions={
-#                     "html": (
-#                         "<div style='"
-#                         "font-size:18px;"
-#                         "font-weight:bold;"
-#                         "color:red;"
-#                         "background:white;"
-#                         "border:2px solid red;"
-#                         "border-radius:50%;"
-#                         "width:22px;"
-#                         "height:22px;"
-#                         "line-height:20px;"
-#                         "text-align:center;'>"
-#                         "!</div>"
-#                     ),
-#                     "className": "near-miss-marker",
-#                     "iconSize": [22, 22],
-#                     "iconAnchor": [11, 11],
-#                 },
-#                 children=[
-#                     dl.Tooltip(
-#                         [
-#                             html.Div(
-#                                 "Near miss: distance < 15 m"
-#                             ),
-#                             html.Div(
-#                                 f"DZ: {row.MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"HOV: {row.PAIR_MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"Time: {row.TIMESTAMP_STR}"
-#                             ),
-#                             html.Div(
-#                                 f"Distance: "
-#                                 f"{row.DISTANCE_METRES:.2f} m"
-#                             ),
-#                             html.Div(
-#                                 f"Area: {row.AREA_CATEGORY}"
-#                             ),
-#                         ]
-#                     )
-#                 ],
-#             )
-#         )
-
-#     # --------------------------------------------------------
-#     # Interaction point markers
-#     # --------------------------------------------------------
-#     point_gdf = gdf_plot.dropna(
-#         subset=["lon", "lat"]
-#     ).copy()
-
-#     if len(point_gdf) > MAX_POINT_MARKERS:
-#         sample_step = max(
-#             1,
-#             math.ceil(
-#                 len(point_gdf)
-#                 / MAX_POINT_MARKERS
-#             ),
-#         )
-
-#         point_gdf = point_gdf.iloc[
-#             ::sample_step
-#         ].copy()
-
-#     for row in point_gdf.itertuples():
-#         marker_color = (
-#             "cyan"
-#             if row.TYPE == "HT"
-#             else prefix_colors.get(
-#                 row.PREFIX,
-#                 "gray",
-#             )
-#         )
-
-#         layers.append(
-#             dl.CircleMarker(
-#                 center=[row.lat, row.lon],
-#                 radius=4,
-#                 color=marker_color,
-#                 fillColor=marker_color,
-#                 fill=True,
-#                 fillOpacity=0.85,
-#                 weight=2,
-#                 children=[
-#                     dl.Tooltip(
-#                         [
-#                             html.Div(
-#                                 f"Type: "
-#                                 f"{'DZ' if row.TYPE == 'HT' else 'HOV'}"
-#                             ),
-#                             html.Div(
-#                                 f"Machine: {row.MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"Asset type: {row.PREFIX}"
-#                             ),
-#                             html.Div(
-#                                 f"Near machine: "
-#                                 f"{row.PAIR_MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"Near asset type: "
-#                                 f"{row.PAIR_PREFIX}"
-#                             ),
-#                             html.Div(
-#                                 f"Time: {row.TIMESTAMP_STR}"
-#                             ),
-#                             html.Div(
-#                                 f"Distance: "
-#                                 f"{row.DISTANCE_METRES:.2f} m"
-#                             ),
-#                             html.Div(
-#                                 f"Interaction: "
-#                                 f"{row.INTERACTION_TYPE}"
-#                             ),
-#                             html.Div(
-#                                 f"Moving: "
-#                                 f"{row.MOVING_STATUS}"
-#                             ),
-#                             html.Div(
-#                                 f"Area: "
-#                                 f"{row.AREA_CATEGORY}"
-#                             ),
-#                             html.Div(
-#                                 f"Distance to lane: "
-#                                 f"{row.DISTANCE_TO_LANE_M:.2f} m"
-#                             ),
-#                             html.Div(
-#                                 f"X: {row.X:.2f}"
-#                             ),
-#                             html.Div(
-#                                 f"Y: {row.Y:.2f}"
-#                             ),
-#                         ]
-#                     )
-#                 ],
-#             )
-#         )
-
-#     # --------------------------------------------------------
-#     # First DZ point X markers
-#     # --------------------------------------------------------
-#     for row in first_dz_points.itertuples():
-#         layers.append(
-#             dl.DivMarker(
-#                 position=[row.lat, row.lon],
-#                 iconOptions={
-#                     "html": (
-#                         "<div style='"
-#                         "font-size:22px;"
-#                         "font-weight:bold;"
-#                         "color:black;"
-#                         "text-shadow:0 0 3px white;'>"
-#                         "X</div>"
-#                     ),
-#                     "className": "dz-entry-x-marker",
-#                     "iconSize": [22, 22],
-#                     "iconAnchor": [11, 11],
-#                 },
-#                 children=[
-#                     dl.Tooltip(
-#                         [
-#                             html.Div(
-#                                 "First DZ point in interaction"
-#                             ),
-#                             html.Div(
-#                                 f"DZ: {row.MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"HOV: {row.PAIR_MACHINE}"
-#                             ),
-#                             html.Div(
-#                                 f"Time: {row.TIMESTAMP_STR}"
-#                             ),
-#                             html.Div(
-#                                 f"Distance: "
-#                                 f"{row.DISTANCE_METRES:.2f} m"
-#                             ),
-#                             html.Div(
-#                                 f"Interaction: "
-#                                 f"{row.INTERACTION_TYPE}"
-#                             ),
-#                             html.Div(
-#                                 f"Moving: "
-#                                 f"{row.MOVING_STATUS}"
-#                             ),
-#                             html.Div(
-#                                 f"Area: "
-#                                 f"{row.AREA_CATEGORY}"
-#                             ),
-#                         ]
-#                     )
-#                 ],
-#             )
-#         )
-
-#     return layers
+    return layers
 
 
 # -----------------------------
 # RUN
 # -----------------------------
 if __name__ == "__main__":
-    app.run(debug=True, port=8002)
+    app.run(
+        debug=True,
+        port=8002,
+        use_reloader=False,
+    )
